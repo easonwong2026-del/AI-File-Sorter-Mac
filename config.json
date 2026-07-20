@@ -1,0 +1,124 @@
+{
+  "_config_version": 8,
+  "_说明": "JSON 不支持注释，因此使用本字段保存中文说明；修改规则后 LaunchAgent 会自动重新检查未分类文件。",
+  "watch_folder": "~/Downloads",
+  "log_file": "logs/sorter.log",
+  "state_file": "logs/state.json",
+  "history_file": "logs/history.json",
+  "scan_interval_seconds": 2,
+  "stable_seconds": 4,
+  "event_idle_seconds": 8,
+  "max_event_runtime_seconds": 900,
+  "process_existing_on_first_start": false,
+  "move_method": "native",
+  "rename": {
+    "enabled": false,
+    "template": "{date}_{original_name}",
+    "date_format": "%Y-%m-%d"
+  },
+  "supported_extensions": [
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".xls",
+    ".xlsx",
+    ".csv",
+    ".tsv",
+    ".ppt",
+    ".pptx",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".webp",
+    ".heic",
+    ".tif",
+    ".tiff",
+    ".mp4",
+    ".mov",
+    ".m4v",
+    ".avi",
+    ".mkv",
+    ".zip",
+    ".rar",
+    ".7z",
+    ".tar",
+    ".gz",
+    ".dmg",
+    ".pkg"
+  ],
+  "rules": [
+    {
+      "enabled": true,
+      "match_mode": "any",
+      "name": "财务票据",
+      "keywords": ["发票", "收据", "账单", "invoice", "receipt"],
+      "exclude_keywords": [],
+      "extensions": ["pdf", "jpg", "jpeg", "png", "heic"],
+      "target": "~/Documents/下载整理/财务票据"
+    },
+    {
+      "enabled": true,
+      "match_mode": "any",
+      "name": "合同与协议",
+      "keywords": ["合同", "协议", "contract", "agreement"],
+      "exclude_keywords": [],
+      "extensions": ["pdf", "doc", "docx"],
+      "target": "~/Documents/下载整理/合同与协议"
+    },
+    {
+      "enabled": true,
+      "match_mode": "any",
+      "name": "屏幕截图",
+      "keywords": ["截屏", "屏幕快照", "screenshot"],
+      "exclude_keywords": [],
+      "extensions": ["jpg", "jpeg", "png", "heic", "webp"],
+      "target": "~/Pictures/截图"
+    },
+    {
+      "enabled": true,
+      "match_mode": "any",
+      "name": "下载图片",
+      "keywords": [],
+      "exclude_keywords": [],
+      "extensions": ["jpg", "jpeg", "png", "gif", "webp", "heic", "tif", "tiff"],
+      "target": "~/Pictures/下载图片"
+    },
+    {
+      "name": "下载视频",
+      "enabled": true,
+      "match_mode": "any",
+      "keywords": [],
+      "exclude_keywords": [],
+      "extensions": ["mp4", "mov", "m4v", "avi", "mkv"],
+      "target": "~/Movies/下载视频"
+    },
+    {
+      "name": "压缩文件",
+      "enabled": true,
+      "match_mode": "any",
+      "keywords": [],
+      "exclude_keywords": [],
+      "extensions": ["zip", "rar", "7z", "tar", "gz"],
+      "target": "~/Documents/下载整理/压缩文件"
+    },
+    {
+      "name": "安装包",
+      "enabled": true,
+      "match_mode": "any",
+      "keywords": [],
+      "exclude_keywords": [],
+      "extensions": ["dmg", "pkg"],
+      "target": "~/Documents/下载整理/安装包"
+    },
+    {
+      "name": "办公文档",
+      "enabled": true,
+      "match_mode": "any",
+      "keywords": [],
+      "exclude_keywords": [],
+      "extensions": ["pdf", "doc", "docx", "xls", "xlsx", "csv", "tsv", "ppt", "pptx"],
+      "target": "~/Documents/下载整理/办公文档"
+    }
+  ]
+}

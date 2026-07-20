@@ -1,0 +1,39 @@
+.DS_Store
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Runtime state and logs
+logs/*
+!logs/.gitkeep
+*.log
+*.lock
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# macOS / Xcode build output
+build/
+dist/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# Generated app bundles and archives
+*.app/
+*.dmg
+*.pkg
+*.zip
+
+# Editors
+.idea/
+.vscode/
+*.swp

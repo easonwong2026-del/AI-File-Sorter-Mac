@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 中文说明：install.sh 会替换占位符，再安装到用户的 LaunchAgents 目录。 -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ai.filesorter</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__PYTHON_PATH__</string>
+        <string>__PROJECT_DIR__/main.py</string>
+        <string>--config</string>
+        <string>__CONFIG_PATH__</string>
+    </array>
+
+    <!-- 开机登录时执行一次；之后由 macOS 原生 WatchPaths 监听目录和规则文件。 -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>WatchPaths</key>
+    <array>
+        <string>__DOWNLOADS_DIR__</string>
+        <string>__CONFIG_PATH__</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__PROJECT_DIR__</string>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <key>StandardOutPath</key>
+    <string>__PROJECT_DIR__/logs/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__PROJECT_DIR__/logs/launchd.err.log</string>
+</dict>
+</plist>
