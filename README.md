@@ -1,6 +1,16 @@
 # AI-File-Sorter-Mac
 
+[![Apache-2.0 License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![macOS 13+](https://img.shields.io/badge/macOS-13%2B-black.svg)](#系统要求)
+[![Latest release](https://img.shields.io/github/v/release/easonwong2026-del/AI-File-Sorter-Mac?display_name=tag)](https://github.com/easonwong2026-del/AI-File-Sorter-Mac/releases/latest)
+
 一个轻量级、可本地运行的 macOS 文件自动整理工具。使用 Swift 原生整理引擎和 macOS `launchd` 的 `WatchPaths` 监听目录，不需要 Python、Docker、后台服务器、Web 服务或持续连接 AI。
+
+## 开源与隐私
+
+本项目采用 [Apache-2.0](LICENSE) 许可证开源。你可以使用、修改和分发代码；提交给本项目的贡献默认也遵循同一许可证。
+
+AI File Sorter 在当前版本完全本地运行：不会上传文件内容、文件名、目录结构、规则配置或日志，也不会自动调用任何 AI 服务。你可以自行选择外部 AI 生成规则 JSON，再先在本机审核并导入。完整边界请看 [隐私说明](PRIVACY.md)。
 
 ## 推荐：使用图形版 macOS App
 
@@ -39,7 +49,12 @@ Agent 使用固定标识 `com.ai.filesorter.agent`。用户配置、状态和日
 
 以后所有设置都可以在 App 中修改。规则保存后自动生效；如果改变监听文件夹，请再点击一次“重新安装并启动”，以更新 LaunchAgent 监听路径。
 
-当前图形版版本为 `2.5.0`，包含 Apple Silicon 和 Intel 两种架构。App 会生成 LaunchAgent 并管理启停，不再调用外部 Python。
+当前图形版版本为 `2.5.1`，包含 Apple Silicon 和 Intel 两种架构。App 会生成 LaunchAgent 并管理启停，不再调用外部 Python。
+
+2.5.1 开源发布：
+
+- 项目改为 Apache-2.0 开源许可，并补充贡献、安全、行为准则和隐私说明。
+- 功能与 2.5.0 保持一致；本版本用于公开源代码与协作基线。
 
 2.5.0 安全升级：
 
@@ -426,3 +441,14 @@ AI-File-Sorter-Mac/
 ```
 
 未来接入 DeepSeek 或 OpenAI 时应保持上述字段，并将 API Key 存入 macOS 钥匙串，不能写进代码或 `config.json`。
+
+## 参与贡献
+
+欢迎通过 Issue 和 Pull Request 参与。提交前请先阅读：
+
+- [贡献指南](CONTRIBUTING.md)
+- [安全政策](SECURITY.md)
+- [社区行为准则](CODE_OF_CONDUCT.md)
+- [隐私说明](PRIVACY.md)
+
+面向 OpenAI API credits 的维护计划在 [docs/OPENAI-CREDITS-PLAN.md](docs/OPENAI-CREDITS-PLAN.md)。该计划是后续研发提案，不代表当前 App 已接入联网 AI 功能。

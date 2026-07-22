@@ -1,0 +1,45 @@
+name: Bug report
+description: Report a reproducible problem without exposing personal files or credentials.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include real file contents, private file names, absolute paths, logs with personal data, API keys, or credentials. For a security issue, follow SECURITY.md instead.
+  - type: input
+    id: version
+    attributes:
+      label: App version
+      placeholder: "For example: 2.5.1"
+    validations:
+      required: true
+  - type: dropdown
+    id: installation
+    attributes:
+      label: Installation type
+      options:
+        - Released App
+        - Built from source
+        - Python compatibility scripts
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: Use a synthetic example and a non-sensitive folder name.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true

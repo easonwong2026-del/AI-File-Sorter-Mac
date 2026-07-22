@@ -1,0 +1,25 @@
+name: Feature request
+description: Suggest an improvement that preserves the local-first and safe-by-default design.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      placeholder: Describe the workflow problem without sharing private files or paths.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety and privacy impact
+      description: Explain how the proposal handles previews, confirmation, undo, local data, and permissions.
+    validations:
+      required: true
