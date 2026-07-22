@@ -47,6 +47,71 @@ struct RenameOptions: Codable, Equatable {
     }
 }
 
+enum OrganizationMode: String, CaseIterable, Identifiable {
+    case manual
+    case review
+    case automatic
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .manual: return "仅手动整理"
+        case .review: return "自动扫描，整理前确认"
+        case .automatic: return "完全自动整理"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .manual: return "后台不会自动移动文件，只保留手动扫描和整理。"
+        case .review: return "后台只负责发现符合条件的文件，确认后才会移动。"
+        case .automatic: return "后台会按规则自动整理符合安全条件的文件。"
+        }
+    }
+}
+
+enum SorterRuntimeState: String {
+    case stopped
+    case running
+    case temporarilyPaused
+    case scanning
+    case awaitingConfirmation
+    case organizing
+    case error
+
+    var isServiceEnabled: Bool {
+        switch self {
+        case .running, .scanning, .awaitingConfirmation, .organizing: return true
+        case .stopped, .temporarilyPaused, .error: return false
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .stopped: return "文件整理已停止"
+        case .running: return "文件整理运行中"
+        case .temporarilyPaused: return "文件整理已临时暂停"
+        case .scanning: return "正在扫描文件"
+        case .awaitingConfirmation: return "等待确认整理"
+        case .organizing: return "正在整理文件"
+        case .error: return "整理服务出现问题"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .stopped: return "不会自动扫描或移动任何文件。"
+        case .running: return "后台会按当前模式处理文件。"
+        case .temporarilyPaused: return "暂停结束后会恢复之前的整理模式。"
+        case .scanning: return "正在读取文件状态，不会跳过安全检查。"
+        case .awaitingConfirmation: return "文件已经列入待整理列表，等待你的确认。"
+        case .organizing: return "正在执行已确认的文件操作。"
+        case .error: return "请打开设置中的环境检查或查看技术日志。"
+        }
+    }
+}
+
 private func splitRuleList(_ value: String) -> [String] {
     value.split(whereSeparator: { $0 == "," || $0 == "，" })
         .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -242,6 +307,11 @@ struct SorterConfig: Codable, Equatable {
     var moveMethod: String
     var rename: RenameOptions
     var supportedExtensions: [String]
+    var organizationMode: String
+    var retentionDays: Int
+    var recentModificationProtectionHours: Int
+    var automaticScanIntervalHours: Int
+    var excludedPaths: [String]
     var rules: [SorterRule]
 
     enum CodingKeys: String, CodingKey {
@@ -259,6 +329,11 @@ struct SorterConfig: Codable, Equatable {
         case moveMethod = "move_method"
         case rename
         case supportedExtensions = "supported_extensions"
+        case organizationMode = "organization_mode"
+        case retentionDays = "retention_days"
+        case recentModificationProtectionHours = "recent_modification_protection_hours"
+        case automaticScanIntervalHours = "automatic_scan_interval_hours"
+        case excludedPaths = "excluded_paths"
         case rules
     }
 
@@ -266,7 +341,9 @@ struct SorterConfig: Codable, Equatable {
         configVersion: Int, note: String?, watchFolder: String, logFile: String, stateFile: String, historyFile: String,
         scanIntervalSeconds: Double, stableSeconds: Double, eventIdleSeconds: Double,
         maxEventRuntimeSeconds: Double, processExistingOnFirstStart: Bool, moveMethod: String,
-        rename: RenameOptions, supportedExtensions: [String], rules: [SorterRule]
+        rename: RenameOptions, supportedExtensions: [String], organizationMode: String,
+        retentionDays: Int, recentModificationProtectionHours: Int, automaticScanIntervalHours: Int,
+        excludedPaths: [String], rules: [SorterRule]
     ) {
         self.configVersion = configVersion
         self.note = note
@@ -282,6 +359,11 @@ struct SorterConfig: Codable, Equatable {
         self.moveMethod = moveMethod
         self.rename = rename
         self.supportedExtensions = supportedExtensions
+        self.organizationMode = organizationMode
+        self.retentionDays = retentionDays
+        self.recentModificationProtectionHours = recentModificationProtectionHours
+        self.automaticScanIntervalHours = automaticScanIntervalHours
+        self.excludedPaths = excludedPaths
         self.rules = rules
     }
 
@@ -307,12 +389,20 @@ struct SorterConfig: Codable, Equatable {
         if storedVersion < 4 {
             for item in [".csv", ".tsv"] where !supportedExtensions.contains(item) { supportedExtensions.append(item) }
         }
+        let storedMode = try c.decodeIfPresent(String.self, forKey: .organizationMode) ?? d.organizationMode
+        organizationMode = OrganizationMode(rawValue: storedMode)?.rawValue ?? (storedVersion < 9 ? OrganizationMode.review.rawValue : d.organizationMode)
+        retentionDays = max(0, try c.decodeIfPresent(Int.self, forKey: .retentionDays) ?? d.retentionDays)
+        recentModificationProtectionHours = max(0, try c.decodeIfPresent(Int.self, forKey: .recentModificationProtectionHours) ?? d.recentModificationProtectionHours)
+        automaticScanIntervalHours = max(0, try c.decodeIfPresent(Int.self, forKey: .automaticScanIntervalHours) ?? d.automaticScanIntervalHours)
+        excludedPaths = (try c.decodeIfPresent([String].self, forKey: .excludedPaths) ?? d.excludedPaths)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
         rules = try c.decodeIfPresent([SorterRule].self, forKey: .rules) ?? d.rules
-        configVersion = 8
+        configVersion = 9
     }
 
     static let fallback = SorterConfig(
-        configVersion: 8,
+        configVersion: 9,
         note: "内置默认配置；所有预置规则均可在图形界面修改或删除。",
         watchFolder: "~/Downloads",
         logFile: "logs/sorter.log",
@@ -331,6 +421,11 @@ struct SorterConfig: Codable, Equatable {
             ".mp4", ".mov", ".m4v", ".avi", ".mkv", ".zip", ".rar", ".7z", ".tar", ".gz",
             ".dmg", ".pkg",
         ],
+        organizationMode: OrganizationMode.review.rawValue,
+        retentionDays: 7,
+        recentModificationProtectionHours: 24,
+        automaticScanIntervalHours: 24,
+        excludedPaths: [],
         rules: [
             SorterRule(name: "财务票据", keywords: ["发票", "收据", "账单", "invoice", "receipt"], extensions: ["pdf", "jpg", "jpeg", "png", "heic"], target: "~/Documents/下载整理/财务票据"),
             SorterRule(name: "合同与协议", keywords: ["合同", "协议", "contract", "agreement"], extensions: ["pdf", "doc", "docx"], target: "~/Documents/下载整理/合同与协议"),
@@ -368,6 +463,14 @@ struct PendingMoveDraft: Identifiable {
     let suggestedTarget: String
 }
 
+enum FileEligibility: Equatable {
+    case eligible
+    case excluded
+    case tooYoung
+    case recentlyModified
+    case locked
+}
+
 struct MoveHistory: Identifiable, Codable {
     let id: String
     let timestamp: Date
@@ -391,6 +494,9 @@ struct OrganizingPlanItem: Identifiable {
     let ruleName: String
     let destinationPath: String
     let status: String
+    let fileSize: UInt64
+    let modifiedAt: Date
+    let ageDays: Int
     var selected: Bool
 }
 
@@ -401,7 +507,7 @@ final class AppModel: ObservableObject {
         didSet { updateUnsavedChanges() }
     }
     @Published private(set) var hasUnsavedChanges = false
-    @Published var automationEnabled = false
+    @Published private(set) var runtimeState: SorterRuntimeState = .stopped
     @Published var busy = false
     @Published var message = "正在准备…"
     @Published var logText = "暂无日志"
@@ -410,10 +516,13 @@ final class AppModel: ObservableObject {
     @Published var pendingMoveDraft: PendingMoveDraft?
     @Published var historyRecords: [MoveHistory] = []
     @Published var organizingPlan: [OrganizingPlanItem] = []
+    @Published var showOrganizingPlan = false
     @Published var ruleTestFileName = "2026年7月_项目合同.pdf"
     @Published var ruleTestResult = "输入文件名后点击测试"
     @Published var ruleDiagnostics = "尚未检查规则"
     @Published var showQuitConfirmation = false
+
+    var automationEnabled: Bool { runtimeState.isServiceEnabled }
 
     let applicationSupportDirectory: URL
     let engineDirectory: URL
@@ -548,7 +657,10 @@ final class AppModel: ObservableObject {
         } else {
             let watch = URL(fileURLWithPath: NSString(string: config.watchFolder).expandingTildeInPath).standardizedFileURL
             let target = URL(fileURLWithPath: NSString(string: rule.target).expandingTildeInPath).standardizedFileURL
-            if target == watch { issues.append(.init(text: "目标不能与监听文件夹相同", isError: true)) }
+            let watchPath = watch.path.hasSuffix("/") ? watch.path : watch.path + "/"
+            if target == watch || target.path.hasPrefix(watchPath) {
+                issues.append(.init(text: "目标不能位于监听文件夹内", isError: true))
+            }
         }
 
         guard rule.enabled else { return issues }
@@ -578,7 +690,7 @@ final class AppModel: ObservableObject {
         }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-        config.configVersion = 8
+        config.configVersion = 9
         if FileManager.default.fileExists(atPath: configURL.path) && !recoveredFromBackup {
             let backup = configURL.deletingLastPathComponent().appendingPathComponent("config.backup.json")
             try? FileManager.default.removeItem(at: backup)
@@ -593,11 +705,12 @@ final class AppModel: ObservableObject {
     }
 
     func refreshStatus() {
+        guard !busy else { return }
         let result = Self.runProcess(
             executable: "/bin/launchctl",
             arguments: ["print", "gui/\(getuid())/com.ai.filesorter"]
         )
-        automationEnabled = result.status == 0
+        runtimeState = result.status == 0 ? .running : .stopped
     }
 
     // 识别 2.0.1 及更早版本指向 Application Support 副本的服务，打开新版时自动迁移。
@@ -621,11 +734,15 @@ final class AppModel: ObservableObject {
         catch { message = "保存失败：\(error.localizedDescription)"; return }
         let watchPath = NSString(string: config.watchFolder).expandingTildeInPath
         let agentURL = bundledAgentURL
+        let organizationMode = config.organizationMode
+        let automaticScanIntervalHours = config.automaticScanIntervalHours
         runBackground(title: "正在安装并启用原生自动整理…") { [configURL] in
             Self.installNativeAgent(
                 agentURL: agentURL,
                 configURL: configURL,
-                watchPath: watchPath
+                watchPath: watchPath,
+                organizationMode: organizationMode,
+                automaticScanIntervalHours: automaticScanIntervalHours
             )
         }
     }
@@ -652,12 +769,22 @@ final class AppModel: ObservableObject {
         })
     }
 
+    func scanOnly() {
+        guard !busy else { return }
+        runtimeState = .scanning
+        generateOrganizingPlan()
+        runtimeState = organizingPlan.isEmpty ? (automationEnabled ? .running : .stopped) : .awaitingConfirmation
+        showOrganizingPlan = true
+    }
+
     private func runBackground(
         title: String,
         operation: @escaping () -> ProcessResult,
         completion: ((ProcessResult) -> Void)? = nil
     ) {
         busy = true
+        if title.contains("扫描") { runtimeState = .scanning }
+        else if title.contains("整理") || title.contains("移动") || title.contains("撤销") { runtimeState = .organizing }
         message = title
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let result = operation()
@@ -692,16 +819,26 @@ final class AppModel: ObservableObject {
         let files = supportedFiles(in: folder)
         let ignored = Set(UserDefaults.standard.stringArray(forKey: ignoredDefaultsKey) ?? [])
         let existing = Dictionary(uniqueKeysWithValues: pendingFiles.map { ($0.path, $0) })
-        pendingFiles = files.lazy.filter { !self.matchesAnyRule(fileURL: $0) }
+        let mode = OrganizationMode(rawValue: config.organizationMode) ?? .review
+        pendingFiles = files.lazy.filter { self.fileEligibility($0) == .eligible }
+            .filter {
+                switch mode {
+                case .review: return self.matchesAnyRule(fileURL: $0)
+                case .manual, .automatic: return !self.matchesAnyRule(fileURL: $0)
+                }
+            }
             .filter { !ignored.contains(self.fileSignatureKey($0)) }
             .prefix(200).map { file in
             if let preserved = existing[file.path] { return preserved }
-            let keyword = suggestedKeyword(for: file)
+            let match = matchingRule(fileURL: file)
+            let keyword = match?.element.keywords.first(where: {
+                file.lastPathComponent.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+            }) ?? suggestedKeyword(for: file)
             return PendingFile(
                 path: file.path,
                 fileName: file.lastPathComponent,
                 keyword: keyword,
-                target: "~/Documents/资料库/\(keyword)"
+                target: match?.element.target ?? "~/Documents/资料库/\(keyword)"
             )
         }
     }
@@ -725,6 +862,36 @@ final class AppModel: ObservableObject {
         return "\(file.path)|\(size)|\(modified)"
     }
 
+    private func pathMatches(_ file: URL, configuredPath: String) -> Bool {
+        let expanded = NSString(string: configuredPath).expandingTildeInPath
+        let configured = URL(fileURLWithPath: expanded).standardizedFileURL.path
+        let candidate = file.standardizedFileURL.path
+        let prefix = configured == "/" ? "/" : (configured.hasSuffix("/") ? configured : configured + "/")
+        return candidate == configured || candidate.hasPrefix(prefix)
+    }
+
+    private func fileEligibility(_ file: URL) -> FileEligibility {
+        if config.excludedPaths.contains(where: { pathMatches(file, configuredPath: $0) }) { return .excluded }
+        let keys: Set<URLResourceKey> = [.creationDateKey, .contentModificationDateKey, .isUserImmutableKey]
+        guard let values = try? file.resourceValues(forKeys: keys) else { return .recentlyModified }
+        if values.isUserImmutable == true { return .locked }
+        let now = Date()
+        let modified = values.contentModificationDate ?? values.creationDate ?? now
+        let ageReference = [values.creationDate, values.contentModificationDate].compactMap { $0 }.max() ?? modified
+        if config.retentionDays > 0,
+           now.timeIntervalSince(ageReference) < Double(config.retentionDays) * 86_400 { return .tooYoung }
+        if config.recentModificationProtectionHours > 0,
+           now.timeIntervalSince(modified) < Double(config.recentModificationProtectionHours) * 3_600 { return .recentlyModified }
+        return .eligible
+    }
+
+    private func fileAgeDays(_ file: URL) -> Int {
+        let keys: Set<URLResourceKey> = [.creationDateKey, .contentModificationDateKey]
+        let values = try? file.resourceValues(forKeys: keys)
+        let reference = [values?.creationDate, values?.contentModificationDate].compactMap { $0 }.max() ?? Date()
+        return max(0, Int(Date().timeIntervalSince(reference) / 86_400))
+    }
+
     // 去掉日期、版本号和常见下载噪声，优先保留最能代表文件内容的名称片段。
     private func suggestedKeyword(for file: URL) -> String {
         let stem = file.deletingPathExtension().lastPathComponent
@@ -744,7 +911,7 @@ final class AppModel: ObservableObject {
 
     private func supportedFiles(in folder: URL) -> [URL] {
         let supported = Set(config.supportedExtensions.map { $0.lowercased() })
-        let temporarySuffixes = [".crdownload", ".download", ".part", ".tmp"]
+        let temporarySuffixes = [".crdownload", ".download", ".part", ".partial", ".tmp"]
         let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isRegularFileKey])) ?? []
         return files.filter {
             let regular = (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
@@ -1148,6 +1315,7 @@ final class AppModel: ObservableObject {
     func generateOrganizingPlan() {
         let folder = URL(fileURLWithPath: NSString(string: config.watchFolder).expandingTildeInPath, isDirectory: true)
         organizingPlan = supportedFiles(in: folder).prefix(300).compactMap { file in
+            guard fileEligibility(file) == .eligible else { return nil }
             guard let match = matchingRule(fileURL: file) else { return nil }
             let target = URL(
                 fileURLWithPath: NSString(string: match.element.target).expandingTildeInPath,
@@ -1162,18 +1330,41 @@ final class AppModel: ObservableObject {
             } else {
                 status = "可以整理"
             }
+            let values = try? file.resourceValues(forKeys: [.fileSizeKey, .creationDateKey, .contentModificationDateKey])
+            let fileSize = UInt64(values?.fileSize ?? 0)
+            let modifiedAt = values?.contentModificationDate ?? values?.creationDate ?? Date()
             return OrganizingPlanItem(
                 id: file.path, sourcePath: file.path, fileName: file.lastPathComponent,
                 ruleName: match.element.name, destinationPath: destination.path,
-                status: status, selected: status != "目标不可写"
+                status: status, fileSize: fileSize, modifiedAt: modifiedAt,
+                ageDays: fileAgeDays(file), selected: status != "目标不可写"
             )
         }
         message = organizingPlan.isEmpty ? "当前没有会被规则整理的文件" : "已生成 \(organizingPlan.count) 项整理计划"
     }
 
     func executeOrganizingPlan() {
-        let paths = organizingPlan.filter(\.selected).map(\.sourcePath)
+        let selectedItems = organizingPlan.filter(\.selected)
+        var missing = 0
+        var changed = 0
+        let paths = selectedItems.compactMap { item -> String? in
+            guard FileManager.default.fileExists(atPath: item.sourcePath) else { missing += 1; return nil }
+            let values = try? URL(fileURLWithPath: item.sourcePath).resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            if UInt64(values?.fileSize ?? 0) != item.fileSize || values?.contentModificationDate != item.modifiedAt { changed += 1 }
+            return item.sourcePath
+        }
         guard !paths.isEmpty else { message = "请至少选择一个可以整理的文件"; return }
+        if missing > 0 || changed > 0 {
+            let alert = NSAlert()
+            alert.messageText = "整理前文件状态发生变化"
+            alert.informativeText = "不存在：\(missing) 个；最近被修改：\(changed) 个。不存在的文件会跳过，已修改的文件仍可继续整理。"
+            alert.addButton(withTitle: "仍然执行")
+            alert.addButton(withTitle: "取消")
+            guard alert.runModal() == .alertFirstButtonReturn else {
+                message = "已取消本次整理"
+                return
+            }
+        }
         do { try saveConfig(showConfirmation: false) }
         catch { message = "保存失败：\(error.localizedDescription)"; return }
         let agent = bundledAgentURL
@@ -1271,7 +1462,13 @@ final class AppModel: ObservableObject {
         }
     }
 
-    nonisolated private static func installNativeAgent(agentURL: URL, configURL: URL, watchPath: String) -> ProcessResult {
+    nonisolated private static func installNativeAgent(
+        agentURL: URL,
+        configURL: URL,
+        watchPath: String,
+        organizationMode: String,
+        automaticScanIntervalHours: Int
+    ) -> ProcessResult {
         let manager = FileManager.default
         let agents = manager.homeDirectoryForCurrentUser.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
         let plistURL = agents.appendingPathComponent("com.ai.filesorter.plist")
@@ -1279,7 +1476,7 @@ final class AppModel: ObservableObject {
         do {
             try manager.createDirectory(at: agents, withIntermediateDirectories: true)
             try manager.createDirectory(at: logs, withIntermediateDirectories: true)
-            let plist: [String: Any] = [
+            var plist: [String: Any] = [
                 "Label": "com.ai.filesorter",
                 "ProgramArguments": [agentURL.path, "--config", configURL.path],
                 "RunAtLoad": true,
@@ -1290,6 +1487,9 @@ final class AppModel: ObservableObject {
                 "StandardOutPath": logs.appendingPathComponent("launchd.out.log").path,
                 "StandardErrorPath": logs.appendingPathComponent("launchd.err.log").path,
             ]
+            if organizationMode == "automatic", automaticScanIntervalHours > 0 {
+                plist["StartInterval"] = max(60, automaticScanIntervalHours * 3_600)
+            }
             let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
             try data.write(to: plistURL, options: .atomic)
             _ = runProcess(executable: "/bin/launchctl", arguments: ["bootout", "gui/\(getuid())/com.ai.filesorter"])
@@ -1310,14 +1510,35 @@ final class AppModel: ObservableObject {
 struct StatusCard: View {
     @ObservedObject var model: AppModel
 
+    private var stateColor: Color {
+        switch model.runtimeState {
+        case .running, .awaitingConfirmation: return .green
+        case .scanning, .organizing: return .blue
+        case .temporarilyPaused: return .orange
+        case .stopped, .error: return .orange
+        }
+    }
+
+    private var stateIcon: String {
+        switch model.runtimeState {
+        case .running: return "checkmark.circle.fill"
+        case .awaitingConfirmation: return "checkmark.circle.fill"
+        case .scanning: return "magnifyingglass.circle.fill"
+        case .organizing: return "arrow.triangle.2.circlepath.circle.fill"
+        case .temporarilyPaused: return "pause.circle.fill"
+        case .stopped: return "pause.circle.fill"
+        case .error: return "exclamationmark.triangle.fill"
+        }
+    }
+
     var body: some View {
         HStack(spacing: 16) {
-            Image(systemName: model.automationEnabled ? "checkmark.circle.fill" : "pause.circle.fill")
+            Image(systemName: stateIcon)
                 .font(.system(size: 34))
-                .foregroundStyle(model.automationEnabled ? .green : .orange)
+                .foregroundStyle(stateColor)
             VStack(alignment: .leading, spacing: 4) {
-                Text(model.automationEnabled ? "自动整理已启用" : "自动整理未启用").font(.title3.bold())
-                Text("由 macOS 在 Downloads 变化时自动唤醒，空闲时不会常驻运行。")
+                Text(model.runtimeState.title).font(.title3.bold())
+                Text("当前模式：\(OrganizationMode(rawValue: model.config.organizationMode)?.title ?? "需要检查") · \(model.runtimeState.detail)")
                     .foregroundStyle(.secondary)
             }
             Spacer()
@@ -1383,6 +1604,64 @@ struct OverviewView: View {
                             Button("选择…") {
                                 model.chooseFolder(current: model.config.watchFolder) { model.config.watchFolder = $0 }
                             }
+                        }
+                        Picker("整理模式", selection: Binding(
+                            get: { model.config.organizationMode },
+                            set: { model.config.organizationMode = $0 }
+                        )) {
+                            ForEach(OrganizationMode.allCases) { mode in
+                                Text(mode.title).tag(mode.rawValue)
+                            }
+                        }
+                        .pickerStyle(.radioGroup)
+                        Text((OrganizationMode(rawValue: model.config.organizationMode) ?? .review).detail)
+                            .font(.caption).foregroundStyle(.secondary).padding(.leading, 110)
+                        GroupBox("整理安全") {
+                            VStack(alignment: .leading, spacing: 9) {
+                                HStack {
+                                    Text("文件保留时间").frame(width: 110, alignment: .leading)
+                                    Stepper(value: Binding(
+                                        get: { model.config.retentionDays },
+                                        set: { model.config.retentionDays = max(0, $0) }
+                                    ), in: 0...365) {
+                                        Text(model.config.retentionDays == 0 ? "不延迟" : "\(model.config.retentionDays) 天")
+                                            .monospacedDigit()
+                                    }
+                                    Text("新文件先保留，0 表示关闭").font(.caption).foregroundStyle(.secondary)
+                                }
+                                HStack {
+                                    Text("最近修改保护").frame(width: 110, alignment: .leading)
+                                    Stepper(value: Binding(
+                                        get: { model.config.recentModificationProtectionHours },
+                                        set: { model.config.recentModificationProtectionHours = max(0, $0) }
+                                    ), in: 0...720) {
+                                        Text(model.config.recentModificationProtectionHours == 0 ? "不保护" : "\(model.config.recentModificationProtectionHours) 小时")
+                                            .monospacedDigit()
+                                    }
+                                    Text("防止仍在编辑的文件被处理").font(.caption).foregroundStyle(.secondary)
+                                }
+                                HStack {
+                                    Text("自动扫描间隔").frame(width: 110, alignment: .leading)
+                                    Stepper(value: Binding(
+                                        get: { model.config.automaticScanIntervalHours },
+                                        set: { model.config.automaticScanIntervalHours = max(0, $0) }
+                                    ), in: 0...168) {
+                                        Text(model.config.automaticScanIntervalHours == 0 ? "仅响应目录变化" : "每 \(model.config.automaticScanIntervalHours) 小时")
+                                            .monospacedDigit()
+                                    }
+                                    Text("用于定期重新检查达到保留时间的文件").font(.caption).foregroundStyle(.secondary)
+                                }
+                                HStack {
+                                    Text("排除路径").frame(width: 110, alignment: .leading)
+                                    TextField("多个路径用逗号分隔，例如 ~/Downloads/保留", text: Binding(
+                                        get: { model.config.excludedPaths.joined(separator: ", ") },
+                                        set: { model.config.excludedPaths = splitRuleList($0) }
+                                    ))
+                                }
+                                Text("目标文件夹不能位于监听文件夹内；临时后缀、隐藏文件和排除路径始终跳过。")
+                                    .font(.caption).foregroundStyle(.secondary).padding(.leading, 110)
+                            }
+                            .padding(6)
                         }
                         Toggle("第一次启用时也整理 Downloads 中已有的文件", isOn: Binding(
                             get: { model.config.processExistingOnFirstStart },
@@ -1676,6 +1955,12 @@ struct OrganizingPlanView: View {
     @ObservedObject var model: AppModel
     @Binding var isPresented: Bool
 
+    private var selectedItems: [OrganizingPlanItem] { model.organizingPlan.filter(\.selected) }
+
+    private var selectedSizeText: String {
+        ByteCountFormatter.string(fromByteCount: Int64(min(selectedItems.reduce(0) { $0 + $1.fileSize }, UInt64(Int64.max))), countStyle: .file)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
@@ -1683,6 +1968,8 @@ struct OrganizingPlanView: View {
                     Text("整理计划").font(.title2.bold())
                     Text("确认来源、规则和目标后再执行；取消不会移动任何文件。")
                         .foregroundStyle(.secondary)
+                    Text("\(model.organizingPlan.count) 项 · 已选 \(selectedItems.count) 项 · \(selectedSizeText)")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button("全选") {
@@ -1713,6 +2000,8 @@ struct OrganizingPlanView: View {
                                 }
                                 Text("→ \(NSString(string: item.destinationPath).abbreviatingWithTildeInPath)")
                                     .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                                Text("文件年龄 \(item.ageDays) 天 · \(ByteCountFormatter.string(fromByteCount: Int64(min(item.fileSize, UInt64(Int64.max))), countStyle: .file)) · 修改于 \(item.modifiedAt.formatted(date: .abbreviated, time: .shortened))")
+                                    .font(.caption2).foregroundStyle(.tertiary)
                             }
                             Spacer()
                             Text(item.status).font(.caption)
@@ -1723,7 +2012,7 @@ struct OrganizingPlanView: View {
             }
 
             HStack {
-                Text("已选择 \(model.organizingPlan.filter(\.selected).count) 项")
+                Text("已选择 \(selectedItems.count) 项 · \(selectedSizeText)")
                     .font(.callout).foregroundStyle(.secondary)
                 Spacer()
                 Button("取消") { isPresented = false }
@@ -2052,7 +2341,7 @@ struct LogsView: View {
             HStack {
                 Button("打开 Downloads") { model.openDownloadsFolder() }
                 Spacer()
-                Text(model.automationEnabled ? "LaunchAgent：已加载" : "LaunchAgent：未加载").foregroundStyle(.secondary)
+                Text(model.runtimeState.title).foregroundStyle(.secondary)
             }
         }
         .padding(22)
@@ -2171,7 +2460,7 @@ struct SidebarContentView: View {
                     Circle()
                         .fill(model.automationEnabled ? Color.green : Color.orange)
                         .frame(width: 8, height: 8)
-                    Text(model.automationEnabled ? "自动整理运行中" : "自动整理已停止")
+                    Text(model.runtimeState.title)
                         .font(.caption).foregroundStyle(.secondary)
                     Spacer()
                 }
@@ -2192,6 +2481,9 @@ struct SidebarContentView: View {
             set: { if !$0 { didShowWelcome = true } }
         )) {
             WelcomeView { didShowWelcome = true }
+        }
+        .sheet(isPresented: $model.showOrganizingPlan) {
+            OrganizingPlanView(model: model, isPresented: $model.showOrganizingPlan)
         }
         .alert("未保存的修改", isPresented: $showingNavigationConfirmation) {
             Button("保存并继续") {
@@ -2283,14 +2575,18 @@ struct AIFileSorterApplication: App {
             }
 
         MenuBarExtra("AI File Sorter", systemImage: model.automationEnabled ? "folder.fill.badge.checkmark" : "folder.badge.gearshape") {
-            Text(model.automationEnabled ? "自动整理已启用" : "自动整理未启用")
+            Text(model.runtimeState.title)
+            Text((OrganizationMode(rawValue: model.config.organizationMode) ?? .review).title)
+                .font(.caption).foregroundStyle(.secondary)
             Divider()
+            Button("立即扫描（不移动）") { model.scanOnly() }
+                .disabled(model.busy)
             Button("立即整理现有文件") { model.sortExistingNow() }
                 .disabled(model.busy)
             if model.automationEnabled {
-                Button("停止自动整理") { model.stopAutomation() }
+                Button("停止整理") { model.stopAutomation() }
             } else {
-                Button("安装并启动") { model.installAndStart() }
+                Button("开始整理") { model.installAndStart() }
             }
             Button("打开主窗口") {
                 NSApp.activate(ignoringOtherApps: true)

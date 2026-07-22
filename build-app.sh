@@ -4,11 +4,14 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
-OUTPUT_DIR="$(cd "$PROJECT_DIR/.." && pwd)"
+OUTPUT_DIR="$PROJECT_DIR/artifacts"
 APP_PATH="$OUTPUT_DIR/AI File Sorter.app"
-ZIP_PATH="$OUTPUT_DIR/AI-File-Sorter-Mac-App.zip"
+VERSION="$(plutil -extract CFBundleShortVersionString raw "$PROJECT_DIR/mac-app/Info.plist")"
+ZIP_PATH="$OUTPUT_DIR/AI-File-Sorter-Mac-App-v$VERSION.zip"
 BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ai-file-sorter-build.XXXXXX")"
 trap 'rm -rf "$BUILD_DIR"' EXIT
+
+mkdir -p "$OUTPUT_DIR"
 
 if ! command -v swiftc >/dev/null 2>&1; then
     echo "找不到 Swift 编译器，请先运行 xcode-select --install。"

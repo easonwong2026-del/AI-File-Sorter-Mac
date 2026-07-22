@@ -73,7 +73,12 @@ class FileSorterTests(unittest.TestCase):
     def test_default_config_contains_editable_rules(self):
         project_config = Path(__file__).resolve().parents[1] / "config.json"
         config = json.loads(project_config.read_text(encoding="utf-8"))
-        self.assertEqual(config["_config_version"], 8)
+        self.assertEqual(config["_config_version"], 9)
+        self.assertEqual(config["organization_mode"], "review")
+        self.assertEqual(config["retention_days"], 7)
+        self.assertEqual(config["recent_modification_protection_hours"], 24)
+        self.assertEqual(config["automatic_scan_interval_hours"], 24)
+        self.assertEqual(config["excluded_paths"], [])
         self.assertIn(".csv", config["supported_extensions"])
         self.assertIn(".dmg", config["supported_extensions"])
         self.assertEqual(len(config["rules"]), 8)

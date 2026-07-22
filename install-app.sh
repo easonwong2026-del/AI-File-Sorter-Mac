@@ -4,7 +4,7 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SOURCE_APP="$(cd "$PROJECT_DIR/.." && pwd)/AI File Sorter.app"
+SOURCE_APP="$PROJECT_DIR/artifacts/AI File Sorter.app"
 TARGET_APP="/Applications/AI File Sorter.app"
 
 if [ ! -d "$SOURCE_APP" ]; then

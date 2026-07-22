@@ -4,7 +4,7 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-APP_PATH="$(cd "$PROJECT_DIR/.." && pwd)/AI File Sorter.app"
+APP_PATH="$PROJECT_DIR/artifacts/AI File Sorter.app"
 AGENT="$APP_PATH/Contents/Library/LaunchServices/com.ai.filesorter.agent"
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ai-file-sorter-native-test.XXXXXX")"
 cleanup() {
@@ -28,6 +28,11 @@ cat > "$CONFIG" <<JSON
   "max_event_runtime_seconds": 2,
   "process_existing_on_first_start": true,
   "move_method": "native",
+  "organization_mode": "automatic",
+  "retention_days": 0,
+  "recent_modification_protection_hours": 0,
+  "automatic_scan_interval_hours": 0,
+  "excluded_paths": [],
   "rename": {"enabled": true, "template": "{date}_{original_name}", "date_format": "%Y-%m-%d"},
   "supported_extensions": [".pdf", ".docx", ".jpg"],
   "rules": [
@@ -122,5 +127,31 @@ JSON
 "$AGENT" --config "$CONFIG"
 grep -q '"version":2' "$ROOT/logs/state.json"
 grep -q '迁移到原生 2.0 格式' "$ROOT/logs/sorter.log"
+
+# 旧配置缺少新字段时默认进入审阅模式，后台不能直接移动命中规则的文件。
+LEGACY_CONFIG="$ROOT/legacy-config.json"
+sed -e '/"organization_mode"/d' \
+    -e '/"retention_days"/d' \
+    -e '/"recent_modification_protection_hours"/d' \
+    -e '/"automatic_scan_interval_hours"/d' \
+    -e '/"excluded_paths"/d' "$CONFIG" > "$LEGACY_CONFIG"
+printf 'legacy-review' > "$ROOT/Downloads/Samsung_旧配置审阅.pdf"
+"$AGENT" --config "$LEGACY_CONFIG"
+test -f "$ROOT/Downloads/Samsung_旧配置审阅.pdf"
+
+# 排除路径在后台自动模式下也必须保留原位。
+EXCLUDED_CONFIG="$ROOT/excluded-config.json"
+sed "s#\"excluded_paths\": \[\],#\"excluded_paths\": [\"$ROOT/Downloads/Samsung_排除.pdf\"],#" "$CONFIG" > "$EXCLUDED_CONFIG"
+printf 'excluded' > "$ROOT/Downloads/Samsung_排除.pdf"
+"$AGENT" --config "$EXCLUDED_CONFIG"
+test -f "$ROOT/Downloads/Samsung_排除.pdf"
+
+# 目标路径位于监听目录内时，必须在配置加载阶段拒绝，避免出现整理循环。
+LOOP_CONFIG="$ROOT/loop-config.json"
+sed "s#\"target\": \"$ROOT/Library/Samsung\"#\"target\": \"$ROOT/Downloads/分类结果\"#" "$CONFIG" > "$LOOP_CONFIG"
+if "$AGENT" --config "$LOOP_CONFIG" --check-config; then
+    echo "错误：监听目录内部目标不应通过配置检查"
+    exit 1
+fi
 
 echo "原生 Agent 端到端测试通过。"

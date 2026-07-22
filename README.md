@@ -8,16 +8,19 @@
 
 - 通过侧边栏查看待分类文件、自动化规则、整理记录和设置。
 - 选择监听文件夹。
+- 选择“仅手动整理”“自动扫描，整理前确认”或“完全自动整理”模式。
+- 设置文件保留时间、最近修改保护、自动扫描间隔和排除路径。
 - 设置首次启用时是否整理现有文件。
 - 开关日期重命名并选择原生文件系统或 Finder 移动。
 - 添加、删除、排序规则；支持关键词和文件扩展名分类。
 - 在“待分类”中处理未匹配文件：可单次移动，也可根据本地建议建立长期规则。
 - 一键安装、启动、停止或立即整理现有文件。
+- 使用“立即扫描（不移动）”生成可审核的整理计划，执行前会重新确认文件状态。
 - 在 App 内查看整理记录、撤销移动；需要排障时再打开技术日志。
 
 直接使用已构建的 App：
 
-1. 解压 `AI-File-Sorter-Mac-App.zip`。
+1. 解压 `AI-File-Sorter-Mac-App-v<版本号>.zip`。
 2. 把 `AI File Sorter.app` 拖入系统的 `/Applications`（“应用程序”）文件夹。固定位置是后台权限稳定的必要条件。
 3. 双击打开，按首次引导检查通用规则，并在“设置”中选择监听目录。
 4. 点击“安装并启动”。不需要管理员密码。
@@ -36,7 +39,14 @@ Agent 使用固定标识 `com.ai.filesorter.agent`。用户配置、状态和日
 
 以后所有设置都可以在 App 中修改。规则保存后自动生效；如果改变监听文件夹，请再点击一次“重新安装并启动”，以更新 LaunchAgent 监听路径。
 
-当前图形版版本为 `2.4.3`，包含 Apple Silicon 和 Intel 两种架构。App 会生成 LaunchAgent 并管理启停，不再调用外部 Python。
+当前图形版版本为 `2.5.0`，包含 Apple Silicon 和 Intel 两种架构。App 会生成 LaunchAgent 并管理启停，不再调用外部 Python。
+
+2.5.0 安全升级：
+
+- 旧配置自动迁移到配置版本 9；缺少新字段时默认使用审阅模式，不会在升级后突然自动移动文件。
+- 完全自动模式才允许后台 Agent 移动文件；手动模式和审阅模式只提供手动整理或确认计划。
+- 新文件保留时间、最近修改保护、临时下载后缀、排除路径和目标目录环路检查在 App 与原生 Agent 两侧同时生效。
+- 整理计划显示文件年龄、大小、修改时间和目标冲突；执行前会重新检查文件是否消失或发生变化。
 
 2.4.3 界面优化：
 
@@ -158,7 +168,7 @@ Agent 使用固定标识 `com.ai.filesorter.agent`。用户配置、状态和日
 ./build-app.sh
 ```
 
-构建产物位于项目上一级：`AI File Sorter.app` 和 `AI-File-Sorter-Mac-App.zip`。
+构建产物位于项目内的 `artifacts/`：`AI File Sorter.app` 和 `AI-File-Sorter-Mac-App-v<版本号>.zip`。
 
 ## 工作方式
 
@@ -167,11 +177,13 @@ Agent 使用固定标识 `com.ai.filesorter.agent`。用户配置、状态和日
         ↓
 macOS LaunchAgent 检测目录变化
         ↓
-等待文件大小和修改时间稳定（避免搬走未下载完的文件）
+根据整理模式决定：手动、扫描后确认，或继续自动处理
+        ↓
+保留时间、最近修改保护和稳定性检查
         ↓
 按 config.json 中从上到下的规则匹配文件名
         ↓
-自动创建目标目录 → 可选重命名 → 安全移动
+确认后或自动创建目标目录 → 可选重命名 → 安全移动
         ↓
 写入 logs/sorter.log
 ```
@@ -316,6 +328,11 @@ tail -f logs/sorter.log
 | `max_event_runtime_seconds` | `900` | 单次下载事件最多跟踪 15 分钟 |
 | `process_existing_on_first_start` | `false` | 第一次启动是否整理已有文件 |
 | `move_method` | `native` | `native` 或 `finder` |
+| `organization_mode` | `review` | `manual`、`review` 或 `automatic` |
+| `retention_days` | `7` | 文件进入监听目录后至少保留多少天；0 表示关闭 |
+| `recent_modification_protection_hours` | `24` | 最近修改保护时长；0 表示关闭 |
+| `automatic_scan_interval_hours` | `24` | 完全自动模式下的定期复查间隔；0 表示只响应目录变化 |
+| `excluded_paths` | `[]` | 不参与扫描或自动整理的文件/目录路径 |
 | `history_file` | `logs/history.json` | 结构化整理历史和撤销记录 |
 | `supported_extensions` | 见配置 | 允许自动整理的文件类型 |
 
@@ -379,6 +396,7 @@ AI-File-Sorter-Mac/
 ├── logger.py               # 日志配置
 ├── install.sh              # 一键安装
 ├── build-app.sh            # 构建 SwiftUI 通用版 App
+├── artifacts/              # 本地构建产物（App 和 zip，不提交 Git）
 ├── install-app.sh          # 安装到系统 /Applications 固定位置
 ├── start.sh                # 启动/触发检查
 ├── stop.sh                 # 停止监听

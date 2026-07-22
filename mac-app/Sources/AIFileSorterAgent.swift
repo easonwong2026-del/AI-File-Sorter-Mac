@@ -104,6 +104,11 @@ struct AgentConfig: Codable {
     var moveMethod = "native"
     var rename = AgentRename()
     var extensions: [String] = []
+    var organizationMode = "review"
+    var retentionDays = 7
+    var recentModificationProtectionHours = 24
+    var automaticScanIntervalHours = 24
+    var excludedPaths: [String] = []
     var rules: [AgentRule] = []
 
     enum CodingKeys: String, CodingKey {
@@ -111,7 +116,13 @@ struct AgentConfig: Codable {
         case scanInterval = "scan_interval_seconds", stableSeconds = "stable_seconds"
         case idleSeconds = "event_idle_seconds", maxRuntime = "max_event_runtime_seconds"
         case processExisting = "process_existing_on_first_start", moveMethod = "move_method"
-        case rename, extensions = "supported_extensions", rules
+        case rename, extensions = "supported_extensions"
+        case organizationMode = "organization_mode"
+        case retentionDays = "retention_days"
+        case recentModificationProtectionHours = "recent_modification_protection_hours"
+        case automaticScanIntervalHours = "automatic_scan_interval_hours"
+        case excludedPaths = "excluded_paths"
+        case rules
     }
 
     init(from decoder: Decoder) throws {
@@ -128,6 +139,14 @@ struct AgentConfig: Codable {
         moveMethod = try c.decodeIfPresent(String.self, forKey: .moveMethod) ?? moveMethod
         rename = try c.decodeIfPresent(AgentRename.self, forKey: .rename) ?? rename
         extensions = try c.decodeIfPresent([String].self, forKey: .extensions) ?? extensions
+        let storedMode = try c.decodeIfPresent(String.self, forKey: .organizationMode) ?? organizationMode
+        organizationMode = ["manual", "review", "automatic"].contains(storedMode) ? storedMode : "review"
+        retentionDays = max(0, try c.decodeIfPresent(Int.self, forKey: .retentionDays) ?? retentionDays)
+        recentModificationProtectionHours = max(0, try c.decodeIfPresent(Int.self, forKey: .recentModificationProtectionHours) ?? recentModificationProtectionHours)
+        automaticScanIntervalHours = max(0, try c.decodeIfPresent(Int.self, forKey: .automaticScanIntervalHours) ?? automaticScanIntervalHours)
+        excludedPaths = (try c.decodeIfPresent([String].self, forKey: .excludedPaths) ?? excludedPaths)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
         rules = try c.decodeIfPresent([AgentRule].self, forKey: .rules) ?? rules
     }
 }
@@ -248,8 +267,13 @@ final class NativeSorter {
         historyURL = resolveURL(decoded.historyFile)
         watchURL = resolveURL(decoded.watchFolder)
         logger = SorterLogger(url: resolveURL(decoded.logFile))
-        if decoded.rules.contains(where: { $0.enabled && resolveURL($0.target).standardizedFileURL == watchURL.standardizedFileURL }) {
-            throw NSError(domain: "AIFileSorter", code: 4, userInfo: [NSLocalizedDescriptionKey: "规则目标不能与监听文件夹相同"])
+        func isInside(_ candidate: URL, root: URL) -> Bool {
+            let rootPath = root.standardizedFileURL.path
+            let candidatePath = candidate.standardizedFileURL.path
+            return candidatePath == rootPath || candidatePath.hasPrefix(rootPath.hasSuffix("/") ? rootPath : rootPath + "/")
+        }
+        if decoded.rules.contains(where: { $0.enabled && isInside(resolveURL($0.target), root: watchURL) }) {
+            throw NSError(domain: "AIFileSorter", code: 4, userInfo: [NSLocalizedDescriptionKey: "规则目标不能位于监听文件夹内"])
         }
         try manager.createDirectory(at: watchURL, withIntermediateDirectories: true)
     }
@@ -269,7 +293,7 @@ final class NativeSorter {
 
     func supportedFiles() -> [URL] {
         let supported = Set(config.extensions.map { $0.lowercased() })
-        let temporary = [".crdownload", ".download", ".part", ".tmp"]
+        let temporary = [".crdownload", ".download", ".part", ".partial", ".tmp"]
         let urls = (try? manager.contentsOfDirectory(at: watchURL, includingPropertiesForKeys: [.isRegularFileKey])) ?? []
         return urls.filter {
             let name = $0.lastPathComponent
@@ -277,6 +301,29 @@ final class NativeSorter {
             return regular && !name.hasPrefix(".") && !temporary.contains(where: { name.lowercased().hasSuffix($0) })
                 && supported.contains("." + $0.pathExtension.lowercased())
         }.sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
+    }
+
+    private func pathMatches(_ file: URL, configuredPath: String) -> Bool {
+        let expanded = NSString(string: configuredPath).expandingTildeInPath
+        let configured = URL(fileURLWithPath: expanded).standardizedFileURL.path
+        let candidate = file.standardizedFileURL.path
+        let prefix = configured == "/" ? "/" : (configured.hasSuffix("/") ? configured : configured + "/")
+        return candidate == configured || candidate.hasPrefix(prefix)
+    }
+
+    func isEligible(_ file: URL) -> Bool {
+        if config.excludedPaths.contains(where: { pathMatches(file, configuredPath: $0) }) { return false }
+        let keys: Set<URLResourceKey> = [.creationDateKey, .contentModificationDateKey, .isUserImmutableKey]
+        guard let values = try? file.resourceValues(forKeys: keys) else { return false }
+        if values.isUserImmutable == true { return false }
+        let now = Date()
+        let modified = values.contentModificationDate ?? values.creationDate ?? now
+        let ageReference = [values.creationDate, values.contentModificationDate].compactMap { $0 }.max() ?? modified
+        if config.retentionDays > 0,
+           now.timeIntervalSince(ageReference) < Double(config.retentionDays) * 86_400 { return false }
+        if config.recentModificationProtectionHours > 0,
+           now.timeIntervalSince(modified) < Double(config.recentModificationProtectionHours) * 3_600 { return false }
+        return true
     }
 
     private func resolveTarget(_ value: String) -> URL {
@@ -567,6 +614,11 @@ func runEvent(_ sorter: NativeSorter) -> Int32 {
         state.files = state.files.filter { $0.value.reason != "unknown" }
         state.rulesFingerprint = sorter.fingerprint
     }
+    guard sorter.config.organizationMode == "automatic" else {
+        sorter.logger.write("INFO", "当前整理模式不允许后台自动移动：\(sorter.config.organizationMode)")
+        sorter.saveState(state)
+        return 0
+    }
     var stable: [String: (FileSignature, Date)] = [:]
     var failed: Set<String> = []
     let started = Date(); var idleSince: Date?
@@ -578,6 +630,7 @@ func runEvent(_ sorter: NativeSorter) -> Int32 {
         for url in files {
             let canonical = url.resolvingSymlinksInPath()
             let key = canonical.path
+            guard sorter.isEligible(canonical) else { continue }
             guard let signature = try? sorter.signature(canonical) else { continue }
             if state.files[key]?.reason == "undo" || state.files[key]?.signature == signature || failed.contains(key) { continue }
             pending += 1
