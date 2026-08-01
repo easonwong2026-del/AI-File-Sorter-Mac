@@ -27,7 +27,7 @@ struct OrganizingPlanView: View {
                 }
                 Spacer()
                 Button("全选") {
-                    for index in model.organizingPlan.indices where model.organizingPlan[index].status != "目标不可写" {
+                    for index in model.organizingPlan.indices where model.organizingPlan[index].canSelect {
                         model.organizingPlan[index].selected = true
                     }
                 }
@@ -43,7 +43,7 @@ struct OrganizingPlanView: View {
                     ForEach($model.organizingPlan) { $item in
                         HStack(alignment: .top, spacing: 10) {
                             Toggle("", isOn: $item.selected).labelsHidden()
-                                .disabled(item.status == "目标不可写")
+                                .disabled(!item.canSelect)
                             Image(systemName: "doc").foregroundStyle(.secondary)
                             VStack(alignment: .leading, spacing: 4) {
                                 HStack {
@@ -59,7 +59,7 @@ struct OrganizingPlanView: View {
                             }
                             Spacer()
                             Text(item.status).font(.caption)
-                                .foregroundStyle(item.status == "可以整理" ? Color.secondary : Color.orange)
+                                .foregroundStyle(item.canSelect ? Color.secondary : Color.orange)
                         }.padding(.vertical, 5)
                     }
                 }.listStyle(.inset)
@@ -83,4 +83,3 @@ struct OrganizingPlanView: View {
         .onDisappear { if !model.busy { model.organizingPlan = [] } }
     }
 }
-
