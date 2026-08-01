@@ -64,16 +64,19 @@ struct AIFileSorterApplication: App {
             }
 
         MenuBarExtra("AI File Sorter", systemImage: model.automationEnabled ? "folder.fill.badge.checkmark" : "folder.badge.gearshape") {
+            Text("后台服务：\(model.automationEnabled ? "已启用" : "未启用")")
             Text(model.serviceStatus.title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
             Text("收件箱：\(model.inboxFileCount) 个文件")
                 .font(.caption).foregroundStyle(.secondary)
             Divider()
             Button("立即扫描") { model.scanOnly() }
                 .disabled(model.busy)
             if model.automationEnabled {
-                Button("暂停自动整理") { model.stopAutomation() }
+                Button("停用后台服务") { model.stopAutomation() }
             } else {
-                Button("开始自动整理") { model.installAndStart() }
+                Button("启用后台服务") { model.installAndStart() }
             }
             Button("打开监听文件夹") { model.openDownloadsFolder() }
             Button("打开应用") {
