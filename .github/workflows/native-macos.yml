@@ -1,0 +1,22 @@
+name: Native macOS
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: macos-13
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build native app
+        run: ./build-app.sh
+
+      - name: Run native Agent tests
+        run: ./tests/test_native_agent.sh

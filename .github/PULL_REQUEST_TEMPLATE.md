@@ -11,6 +11,6 @@ Describe what changed and why.
 
 ## Validation
 
-- [ ] `python3 -m unittest discover -s tests -v`
+- [ ] `./build-app.sh`
 - [ ] `./tests/test_native_agent.sh`
 - [ ] Relevant manual macOS verification, if applicable
