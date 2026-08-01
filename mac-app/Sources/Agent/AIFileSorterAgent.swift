@@ -467,6 +467,15 @@ final class NativeSorter {
         guard !temporaryFileSuffixes.contains(where: { name.lowercased().hasSuffix($0) }) else {
             return emptyAssessment(.temporary, "临时下载后缀不会整理：" + name)
         }
+        if case .confirmedMove = intent {
+            // 用户明确选择的单次整理可以处理不在自动白名单中的普通文件，
+            // 但仍然不能绕过隐藏、临时、锁定和路径安全检查。
+        } else {
+            let supported = Set(config.extensions.map { $0.lowercased().hasPrefix(".") ? $0.lowercased() : "." + $0.lowercased() })
+            guard supported.contains("." + canonicalSource.pathExtension.lowercased()) else {
+                return emptyAssessment(.unsupported, "文件类型不在自动整理白名单中：" + name)
+            }
+        }
         if config.excludedPaths.contains(where: { pathMatches(canonicalSource, configuredPath: $0) }) {
             return emptyAssessment(.excluded, "文件位于排除路径：" + canonicalSource.path)
         }
