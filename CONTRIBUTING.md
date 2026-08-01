@@ -10,10 +10,10 @@
 
 ## 本地验证
 
-开发环境需要 macOS 13 或更新版本。Python 兼容层不需要第三方依赖；原生 App 需要 Xcode Command Line Tools。
+开发环境需要 macOS 13 或更新版本，以及 Xcode Command Line Tools。
 
 ```bash
-python3 -m unittest discover -s tests -v
+./build-app.sh
 ./tests/test_native_agent.sh
 ```
 
@@ -29,7 +29,7 @@ python3 -m unittest discover -s tests -v
 
 - 任何可能移动文件的流程都应保留预览、确认、冲突保护或撤销路径。
 - 默认不得自动上传用户数据或调用第三方服务。
-- Swift 原生 Agent 与 Python 兼容层的关键整理安全规则应保持一致。
+- Swift 原生 App 与 Agent 的关键整理安全规则应保持一致。
 - 新增配置字段时，要为旧配置提供安全的迁移默认值。
 - 更新用户可见行为时，请同步更新 README、测试或相关说明。
 

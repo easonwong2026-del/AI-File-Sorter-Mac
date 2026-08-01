@@ -91,6 +91,74 @@ struct AgentRule: Codable {
     }
 }
 
+enum FileProcessingStatus: Equatable {
+    case eligible
+    case moved
+    case missing
+    case notRegularFile
+    case hidden
+    case unsupported
+    case temporary
+    case excluded
+    case locked
+    case metadataUnavailable
+    case sourceOutsideWatchFolder
+    case retentionProtected
+    case recentModificationProtected
+    case unstable
+    case noMatchingRule
+    case sameLocation
+    case destinationInWatchFolder
+    case destinationCycle
+    case invalidDestination
+    case failed
+
+    var label: String {
+        switch self {
+        case .eligible: return "可以整理"
+        case .moved: return "成功"
+        case .missing: return "文件已不存在"
+        case .notRegularFile: return "不是普通文件"
+        case .hidden: return "隐藏文件"
+        case .unsupported: return "不支持的文件类型"
+        case .temporary: return "临时下载文件"
+        case .excluded: return "位于排除路径"
+        case .locked: return "文件已锁定"
+        case .metadataUnavailable: return "无法读取文件状态"
+        case .sourceOutsideWatchFolder: return "来源不在监听目录内"
+        case .retentionProtected: return "仍在保留期内"
+        case .recentModificationProtected: return "最近修改保护中"
+        case .unstable: return "文件仍在写入或状态发生变化"
+        case .noMatchingRule: return "未分类"
+        case .sameLocation: return "来源与目标相同"
+        case .destinationInWatchFolder: return "目标位于监听目录内"
+        case .destinationCycle: return "目标会形成整理循环"
+        case .invalidDestination: return "目标目录无效"
+        case .failed: return "失败"
+        }
+    }
+}
+
+enum FileProcessingIntent {
+    case automatic
+    case once
+    case plan
+    case confirmedMove(target: URL)
+    case eligibility
+
+    var bypassTimeProtection: Bool {
+        if case .confirmedMove = self { return true }
+        return false
+    }
+
+    var requiresStability: Bool {
+        switch self {
+        case .automatic, .once, .plan: return true
+        case .confirmedMove, .eligibility: return false
+        }
+    }
+}
+
 struct AgentConfig: Codable {
     var watchFolder = "~/Downloads"
     var logFile = "logs/sorter.log"
@@ -105,8 +173,8 @@ struct AgentConfig: Codable {
     var rename = AgentRename()
     var extensions: [String] = []
     var organizationMode = "review"
-    var retentionDays = 7
-    var recentModificationProtectionHours = 24
+    var retentionDays = 0
+    var recentModificationProtectionHours = 0
     var automaticScanIntervalHours = 24
     var excludedPaths: [String] = []
     var rules: [AgentRule] = []
@@ -154,6 +222,26 @@ struct AgentConfig: Codable {
 struct FileSignature: Codable, Equatable {
     let size: UInt64
     let modified: Int64
+}
+
+struct FileProcessingAssessment {
+    let status: FileProcessingStatus
+    let source: URL
+    let canonicalSource: URL
+    let signature: FileSignature?
+    let ruleIndex: Int?
+    let rule: AgentRule?
+    let target: URL?
+    let detail: String
+
+    var canMove: Bool { status == .eligible }
+
+    func replacing(status: FileProcessingStatus, detail: String) -> FileProcessingAssessment {
+        FileProcessingAssessment(
+            status: status, source: source, canonicalSource: canonicalSource,
+            signature: signature, ruleIndex: ruleIndex, rule: rule, target: target, detail: detail
+        )
+    }
 }
 
 struct StateRecord: Codable {
@@ -228,6 +316,19 @@ final class SorterLogger {
     }
 }
 
+private let temporaryFileSuffixes = [".crdownload", ".download", ".part", ".partial", ".tmp"]
+
+private func canonicalFileURL(_ url: URL) -> URL {
+    url.standardizedFileURL.resolvingSymlinksInPath().standardizedFileURL
+}
+
+private func pathIsInside(_ candidate: URL, root: URL) -> Bool {
+    let rootPath = canonicalFileURL(root).path
+    let candidatePath = canonicalFileURL(candidate).path
+    let prefix = rootPath == "/" ? "/" : (rootPath.hasSuffix("/") ? rootPath : rootPath + "/")
+    return candidatePath == rootPath || candidatePath.hasPrefix(prefix)
+}
+
 final class NativeSorter {
     let configURL: URL
     var config: AgentConfig
@@ -267,12 +368,7 @@ final class NativeSorter {
         historyURL = resolveURL(decoded.historyFile)
         watchURL = resolveURL(decoded.watchFolder)
         logger = SorterLogger(url: resolveURL(decoded.logFile))
-        func isInside(_ candidate: URL, root: URL) -> Bool {
-            let rootPath = root.standardizedFileURL.path
-            let candidatePath = candidate.standardizedFileURL.path
-            return candidatePath == rootPath || candidatePath.hasPrefix(rootPath.hasSuffix("/") ? rootPath : rootPath + "/")
-        }
-        if decoded.rules.contains(where: { $0.enabled && isInside(resolveURL($0.target), root: watchURL) }) {
+        if decoded.rules.contains(where: { $0.enabled && pathIsInside(resolveURL($0.target), root: watchURL) }) {
             throw NSError(domain: "AIFileSorter", code: 4, userInfo: [NSLocalizedDescriptionKey: "规则目标不能位于监听文件夹内"])
         }
         try manager.createDirectory(at: watchURL, withIntermediateDirectories: true)
@@ -293,42 +389,166 @@ final class NativeSorter {
 
     func supportedFiles() -> [URL] {
         let supported = Set(config.extensions.map { $0.lowercased() })
-        let temporary = [".crdownload", ".download", ".part", ".partial", ".tmp"]
         let urls = (try? manager.contentsOfDirectory(at: watchURL, includingPropertiesForKeys: [.isRegularFileKey])) ?? []
         return urls.filter {
             let name = $0.lastPathComponent
             let regular = (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
-            return regular && !name.hasPrefix(".") && !temporary.contains(where: { name.lowercased().hasSuffix($0) })
+            return regular && !name.hasPrefix(".") && !temporaryFileSuffixes.contains(where: { name.lowercased().hasSuffix($0) })
                 && supported.contains("." + $0.pathExtension.lowercased())
         }.sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
     }
 
     private func pathMatches(_ file: URL, configuredPath: String) -> Bool {
-        let expanded = NSString(string: configuredPath).expandingTildeInPath
-        let configured = URL(fileURLWithPath: expanded).standardizedFileURL.path
-        let candidate = file.standardizedFileURL.path
-        let prefix = configured == "/" ? "/" : (configured.hasSuffix("/") ? configured : configured + "/")
-        return candidate == configured || candidate.hasPrefix(prefix)
+        pathIsInside(file, root: resolveConfiguredPath(configuredPath))
     }
 
     func isEligible(_ file: URL) -> Bool {
-        if config.excludedPaths.contains(where: { pathMatches(file, configuredPath: $0) }) { return false }
-        let keys: Set<URLResourceKey> = [.creationDateKey, .contentModificationDateKey, .isUserImmutableKey]
-        guard let values = try? file.resourceValues(forKeys: keys) else { return false }
-        if values.isUserImmutable == true { return false }
-        let now = Date()
-        let modified = values.contentModificationDate ?? values.creationDate ?? now
-        let ageReference = [values.creationDate, values.contentModificationDate].compactMap { $0 }.max() ?? modified
-        if config.retentionDays > 0,
-           now.timeIntervalSince(ageReference) < Double(config.retentionDays) * 86_400 { return false }
-        if config.recentModificationProtectionHours > 0,
-           now.timeIntervalSince(modified) < Double(config.recentModificationProtectionHours) * 3_600 { return false }
-        return true
+        evaluate(file, intent: .eligibility).status == .eligible
+    }
+
+    private func resolveConfiguredPath(_ value: String) -> URL {
+        let expanded = NSString(string: value).expandingTildeInPath
+        return expanded.hasPrefix("/") ? URL(fileURLWithPath: expanded) : base.appendingPathComponent(expanded)
     }
 
     private func resolveTarget(_ value: String) -> URL {
-        let expanded = NSString(string: value).expandingTildeInPath
-        return expanded.hasPrefix("/") ? URL(fileURLWithPath: expanded, isDirectory: true) : base.appendingPathComponent(expanded, isDirectory: true)
+        resolveConfiguredPath(value).standardizedFileURL
+    }
+
+    private func isLocked(_ file: URL, values: URLResourceValues) -> Bool {
+        if values.isUserImmutable == true { return true }
+
+        // Finder 的“已锁定”由 isUserImmutable 表示；这里再尊重其他进程的
+        // advisory flock，避免 --once 在文件仍被明确占用时搬走它。
+        let descriptor = open(file.path, O_RDONLY | O_NONBLOCK)
+        guard descriptor >= 0 else { return false }
+        defer { close(descriptor) }
+        guard flock(descriptor, LOCK_EX | LOCK_NB) != 0 else {
+            flock(descriptor, LOCK_UN)
+            return false
+        }
+        return errno == EWOULDBLOCK || errno == EAGAIN
+    }
+
+    func evaluate(
+        _ source: URL,
+        intent: FileProcessingIntent,
+        expectedSignature: FileSignature? = nil,
+        stableSince: Date? = nil
+    ) -> FileProcessingAssessment {
+        let standardizedSource = source.standardizedFileURL
+        let canonicalSource = canonicalFileURL(standardizedSource)
+        func emptyAssessment(_ status: FileProcessingStatus, _ detail: String, signature: FileSignature? = nil,
+                             ruleIndex: Int? = nil, rule: AgentRule? = nil, target: URL? = nil) -> FileProcessingAssessment {
+            FileProcessingAssessment(
+                status: status, source: standardizedSource, canonicalSource: canonicalSource,
+                signature: signature, ruleIndex: ruleIndex, rule: rule, target: target, detail: detail
+            )
+        }
+
+        guard manager.fileExists(atPath: standardizedSource.path) else {
+            return emptyAssessment(.missing, "文件已不存在：" + standardizedSource.path)
+        }
+        guard pathIsInside(canonicalSource, root: watchURL) else {
+            return emptyAssessment(.sourceOutsideWatchFolder, "来源不在监听目录内：" + canonicalSource.path)
+        }
+        guard let values = try? canonicalSource.resourceValues(forKeys: [
+            .isRegularFileKey, .creationDateKey, .contentModificationDateKey, .isUserImmutableKey
+        ]) else {
+            return emptyAssessment(.metadataUnavailable, "无法读取文件状态：" + canonicalSource.path)
+        }
+        guard values.isRegularFile == true else {
+            return emptyAssessment(.notRegularFile, "不是普通文件：" + canonicalSource.path)
+        }
+        let name = canonicalSource.lastPathComponent
+        guard !name.hasPrefix(".") else {
+            return emptyAssessment(.hidden, "隐藏文件不会自动整理：" + name)
+        }
+        guard !temporaryFileSuffixes.contains(where: { name.lowercased().hasSuffix($0) }) else {
+            return emptyAssessment(.temporary, "临时下载后缀不会整理：" + name)
+        }
+        if case .confirmedMove = intent {
+            // 用户明确选择的单次整理可以处理不在自动白名单中的普通文件，
+            // 但仍然不能绕过隐藏、临时、锁定和路径安全检查。
+        } else {
+            let supported = Set(config.extensions.map { $0.lowercased().hasPrefix(".") ? $0.lowercased() : "." + $0.lowercased() })
+            guard supported.contains("." + canonicalSource.pathExtension.lowercased()) else {
+                return emptyAssessment(.unsupported, "文件类型不在自动整理白名单中：" + name)
+            }
+        }
+        if config.excludedPaths.contains(where: { pathMatches(canonicalSource, configuredPath: $0) }) {
+            return emptyAssessment(.excluded, "文件位于排除路径：" + canonicalSource.path)
+        }
+        guard !isLocked(canonicalSource, values: values) else {
+            return emptyAssessment(.locked, "文件已锁定或被其他进程占用：" + canonicalSource.path)
+        }
+
+        let currentSignature = try? signature(canonicalSource)
+        guard let currentSignature else {
+            return emptyAssessment(.metadataUnavailable, "无法读取文件签名：" + canonicalSource.path)
+        }
+        let now = Date()
+        if let expectedSignature, expectedSignature != currentSignature {
+            return emptyAssessment(.unstable, "文件在稳定等待期间发生变化：" + canonicalSource.path, signature: currentSignature)
+        }
+        if !intent.bypassTimeProtection {
+            let modified = values.contentModificationDate ?? values.creationDate ?? now
+            let ageReference = [values.creationDate, values.contentModificationDate].compactMap { $0 }.max() ?? modified
+            if config.retentionDays > 0,
+               now.timeIntervalSince(ageReference) < Double(config.retentionDays) * 86_400 {
+                return emptyAssessment(.retentionProtected, "文件仍在保留期内：" + canonicalSource.path, signature: currentSignature)
+            }
+            if config.recentModificationProtectionHours > 0,
+               now.timeIntervalSince(modified) < Double(config.recentModificationProtectionHours) * 3_600 {
+                return emptyAssessment(.recentModificationProtected, "文件最近修改保护中：" + canonicalSource.path, signature: currentSignature)
+            }
+        }
+        if intent.requiresStability, config.stableSeconds > 0 {
+            guard let stableSince,
+                  now.timeIntervalSince(stableSince) >= config.stableSeconds else {
+                return emptyAssessment(.unstable, "文件尚未稳定 " + String(config.stableSeconds) + " 秒：" + canonicalSource.path, signature: currentSignature)
+            }
+        }
+
+        if case .eligibility = intent {
+            return emptyAssessment(.eligible, "文件符合安全条件", signature: currentSignature)
+        }
+
+        let selectedRule: (offset: Int, element: AgentRule)?
+        let target: URL
+        switch intent {
+        case .confirmedMove(let requestedTarget):
+            selectedRule = nil
+            target = requestedTarget.standardizedFileURL
+        default:
+            guard let match = config.rules.enumerated().first(where: { _, rule in rule.matches(canonicalSource) }) else {
+                return emptyAssessment(.noMatchingRule, "没有匹配规则：" + canonicalSource.path, signature: currentSignature)
+            }
+            selectedRule = match
+            target = resolveTarget(match.element.target)
+        }
+
+        let canonicalTarget = canonicalFileURL(target)
+        guard !target.path.isEmpty else {
+            return emptyAssessment(.invalidDestination, "目标目录为空", signature: currentSignature,
+                                    ruleIndex: selectedRule?.offset, rule: selectedRule?.element, target: target)
+        }
+        if canonicalTarget == canonicalSource || canonicalTarget == canonicalFileURL(canonicalSource.deletingLastPathComponent()) {
+            return emptyAssessment(.sameLocation, "来源与目标目录相同：" + canonicalTarget.path, signature: currentSignature,
+                                    ruleIndex: selectedRule?.offset, rule: selectedRule?.element, target: canonicalTarget)
+        }
+        if pathIsInside(canonicalTarget, root: watchURL) {
+            return emptyAssessment(.destinationInWatchFolder, "目标位于监听目录内，可能形成整理循环：" + canonicalTarget.path, signature: currentSignature,
+                                    ruleIndex: selectedRule?.offset, rule: selectedRule?.element, target: canonicalTarget)
+        }
+        if manager.fileExists(atPath: target.path) {
+            guard (try? target.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else {
+                return emptyAssessment(.invalidDestination, "目标路径不是目录：" + target.path, signature: currentSignature,
+                                        ruleIndex: selectedRule?.offset, rule: selectedRule?.element, target: canonicalTarget)
+            }
+        }
+        return emptyAssessment(.eligible, "文件符合安全条件", signature: currentSignature,
+                                ruleIndex: selectedRule?.offset, rule: selectedRule?.element, target: canonicalTarget)
     }
 
     private func swiftDateFormat(_ python: String) -> String {
@@ -337,14 +557,14 @@ final class NativeSorter {
             .replacingOccurrences(of: "%M", with: "mm").replacingOccurrences(of: "%S", with: "ss")
     }
 
-    private func destinationName(_ source: URL, rule: AgentRule) -> String {
-        guard config.rename.enabled else { return source.lastPathComponent }
+    private func destinationName(_ source: URL, rule: AgentRule?) -> String {
+        guard config.rename.enabled, rule != nil else { return source.lastPathComponent }
         let formatter = DateFormatter(); formatter.dateFormat = swiftDateFormat(config.rename.dateFormat)
         let ext = source.pathExtension
-        let keyword = rule.keywords.first(where: {
+        let keyword = rule?.keywords.first(where: {
             source.lastPathComponent.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) != nil
         }) ?? "关键词"
-        let category = resolveTarget(rule.target).lastPathComponent
+        let category = rule.map { resolveTarget($0.target).lastPathComponent } ?? "单次整理"
         var name = config.rename.template
             .replacingOccurrences(of: "{date}", with: formatter.string(from: Date()))
             .replacingOccurrences(of: "{original_name}", with: source.deletingPathExtension().lastPathComponent)
@@ -423,23 +643,42 @@ final class NativeSorter {
         }
     }
 
-    @discardableResult func sort(_ source: URL, batchID: String? = nil) -> String {
-        guard let pair = config.rules.enumerated().first(where: { _, rule in rule.matches(source) }) else {
-            logger.write("INFO", "原文件=\(source.path) | 目标=- | 结果=未分类 | 说明=没有匹配规则；AI 接口为预留状态")
-            return "unknown"
+    @discardableResult
+    func process(
+        _ source: URL,
+        intent: FileProcessingIntent,
+        batchID: String? = nil,
+        expectedSignature: FileSignature? = nil,
+        stableSince: Date? = nil
+    ) -> FileProcessingAssessment {
+        let assessment = evaluate(source, intent: intent, expectedSignature: expectedSignature, stableSince: stableSince)
+        guard assessment.canMove, let folder = assessment.target else {
+            logger.write("INFO", "原文件=\(assessment.source.path) | 目标=\(assessment.target?.path ?? "-") | 结果=\(assessment.status.label) | 说明=\(assessment.detail)")
+            return assessment
         }
-        let folder = resolveTarget(pair.element.target)
         do {
             try manager.createDirectory(at: folder, withIntermediateDirectories: true)
-            let destination = collisionFree(folder.appendingPathComponent(destinationName(source, rule: pair.element)))
-            if config.moveMethod == "finder" { try moveWithFinder(source, destination) }
-            else { try manager.moveItem(at: source, to: destination) }
-            recordMove(source: source, destination: destination, reason: "规则 \(pair.offset + 1)", batchID: batchID)
-            logger.write("INFO", "原文件=\(source.path) | 目标=\(destination.path) | 结果=成功 | 说明=规则 \(pair.offset + 1) 匹配并移动")
-            return "moved"
+            let destination = collisionFree(folder.appendingPathComponent(destinationName(assessment.canonicalSource, rule: assessment.rule)))
+            if config.moveMethod == "finder" { try moveWithFinder(assessment.canonicalSource, destination) }
+            else { try manager.moveItem(at: assessment.canonicalSource, to: destination) }
+            let reason = assessment.ruleIndex.map { "规则 \($0 + 1)" } ?? "单次整理"
+            recordMove(source: assessment.canonicalSource, destination: destination, reason: reason, batchID: batchID)
+            logger.write("INFO", "原文件=\(assessment.canonicalSource.path) | 目标=\(destination.path) | 结果=成功 | 说明=\(reason) 匹配并移动")
+            return assessment.replacing(status: .moved, detail: destination.path)
         } catch {
-            logger.write("ERROR", "原文件=\(source.path) | 目标=\(folder.path) | 结果=失败 | 说明=\(error.localizedDescription)")
-            return "error"
+            logger.write("ERROR", "原文件=\(assessment.canonicalSource.path) | 目标=\(folder.path) | 结果=失败 | 说明=\(error.localizedDescription)")
+            return assessment.replacing(status: .failed, detail: error.localizedDescription)
+        }
+    }
+
+    @discardableResult
+    func sort(_ source: URL, batchID: String? = nil, expectedSignature: FileSignature? = nil, stableSince: Date? = nil) -> String {
+        let result = process(source, intent: .plan, batchID: batchID, expectedSignature: expectedSignature, stableSince: stableSince)
+        switch result.status {
+        case .moved: return "moved"
+        case .noMatchingRule: return "unknown"
+        case .failed: return "error"
+        default: return "skipped"
         }
     }
 
@@ -447,24 +686,13 @@ final class NativeSorter {
     func moveOnce(sourcePath: String, targetPath: String, batchID: String? = nil) -> Int32 {
         let source = URL(fileURLWithPath: NSString(string: sourcePath).expandingTildeInPath)
         let folder = URL(fileURLWithPath: NSString(string: targetPath).expandingTildeInPath, isDirectory: true)
-        guard manager.fileExists(atPath: source.path) else { print("文件已不存在：\(source.path)"); return 1 }
-        guard source.deletingLastPathComponent().standardizedFileURL != folder.standardizedFileURL else {
-            print("文件已经位于所选目录，请选择其他目标目录"); return 1
-        }
-        do {
-            try manager.createDirectory(at: folder, withIntermediateDirectories: true)
-            let destination = collisionFree(folder.appendingPathComponent(source.lastPathComponent))
-            if config.moveMethod == "finder" { try moveWithFinder(source, destination) }
-            else { try manager.moveItem(at: source, to: destination) }
-            recordMove(source: source, destination: destination, reason: "单次整理", batchID: batchID)
-            logger.write("INFO", "原文件=\(source.path) | 目标=\(destination.path) | 结果=成功 | 说明=单次整理，不建立规则")
+        let result = process(source, intent: .confirmedMove(target: folder), batchID: batchID)
+        if result.status == .moved {
             print("单次整理完成：\(source.lastPathComponent) → \(folder.path)")
             return 0
-        } catch {
-            logger.write("ERROR", "原文件=\(source.path) | 目标=\(folder.path) | 结果=失败 | 说明=单次整理：\(error.localizedDescription)")
-            print("单次整理失败：\(error.localizedDescription)")
-            return 1
         }
+        print("单次整理未执行：\(result.status.label)（\(result.detail)）")
+        return 1
     }
 
     func moveMany(sourcePaths: [String], targetPath: String) -> Int32 {
@@ -478,10 +706,17 @@ final class NativeSorter {
     func sortPaths(_ paths: [String]) -> Int32 {
         let batchID = UUID().uuidString
         var moved = 0, failed = 0
+        let started = Date()
+        let snapshots = Dictionary(uniqueKeysWithValues: paths.compactMap { path in
+            let source = URL(fileURLWithPath: NSString(string: path).expandingTildeInPath)
+            return try? (source.path, signature(source))
+        })
+        Thread.sleep(forTimeInterval: max(0, config.stableSeconds))
         for path in paths {
             let source = URL(fileURLWithPath: NSString(string: path).expandingTildeInPath)
-            guard manager.fileExists(atPath: source.path) else { failed += 1; continue }
-            if sort(source, batchID: batchID) == "moved" { moved += 1 } else { failed += 1 }
+            let result = process(source, intent: .plan, batchID: batchID,
+                                 expectedSignature: snapshots[source.path], stableSince: started)
+            if result.status == .moved { moved += 1 } else { failed += 1 }
         }
         print("整理计划执行完成：成功 \(moved) 个，失败或已不匹配 \(failed) 个")
         return failed == 0 ? 0 : 1
@@ -576,14 +811,19 @@ func acquireLock(_ url: URL) -> Int32? {
 func runOnce(_ sorter: NativeSorter) -> Int32 {
     let candidates = sorter.supportedFiles()
     let before = Dictionary(uniqueKeysWithValues: candidates.compactMap { url in try? (url.path, sorter.signature(url)) })
+    let started = Date()
     Thread.sleep(forTimeInterval: max(0, sorter.config.stableSeconds))
     var moved = 0, unknown = 0, errors = 0, changing = 0
     for url in sorter.supportedFiles() {
-        guard let current = try? sorter.signature(url), before[url.path] == current else { changing += 1; continue }
-        switch sorter.sort(url) {
-        case "moved": moved += 1
-        case "unknown": unknown += 1
-        case "error": errors += 1
+        guard let expected = before[url.path] else { changing += 1; continue }
+        let result = sorter.process(
+            url, intent: .once, expectedSignature: expected, stableSince: started
+        )
+        switch result.status {
+        case .moved: moved += 1
+        case .noMatchingRule: unknown += 1
+        case .unstable: changing += 1
+        case .failed: errors += 1
         default: break
         }
     }
@@ -630,15 +870,30 @@ func runEvent(_ sorter: NativeSorter) -> Int32 {
         for url in files {
             let canonical = url.resolvingSymlinksInPath()
             let key = canonical.path
-            guard sorter.isEligible(canonical) else { continue }
-            guard let signature = try? sorter.signature(canonical) else { continue }
-            if state.files[key]?.reason == "undo" || state.files[key]?.signature == signature || failed.contains(key) { continue }
+            guard let currentSignature = try? sorter.signature(canonical) else { continue }
+            if state.files[key]?.reason == "undo" || state.files[key]?.signature == currentSignature || failed.contains(key) { continue }
+            let previous = stable[key]
+            let result = sorter.evaluate(canonical, intent: .automatic,
+                                         expectedSignature: previous?.0, stableSince: previous?.1)
+            if result.status == .unstable {
+                pending += 1
+                if previous?.0 != result.signature, let signature = result.signature {
+                    stable[key] = (signature, Date())
+                }
+                continue
+            }
+            if result.status == .noMatchingRule, let signature = result.signature {
+                state.files[key] = StateRecord(signature: signature, reason: "unknown")
+                stable[key] = nil
+                continue
+            }
+            guard result.status == .eligible, let signature = result.signature else { continue }
             pending += 1
-            if let item = stable[key], item.0 == signature, Date().timeIntervalSince(item.1) >= sorter.config.stableSeconds {
-                let result = sorter.sort(canonical); stable[key] = nil
-                if result == "unknown" { state.files[key] = StateRecord(signature: signature, reason: "unknown") }
-                if result == "error" { failed.insert(key) }
-            } else if stable[key]?.0 != signature { stable[key] = (signature, Date()) }
+            let processed = sorter.process(canonical, intent: .automatic,
+                                            batchID: nil, expectedSignature: signature, stableSince: previous?.1)
+            stable[key] = nil
+            if processed.status == .noMatchingRule { state.files[key] = StateRecord(signature: signature, reason: "unknown") }
+            if processed.status == .failed { failed.insert(key) }
         }
         sorter.saveState(state)
         if pending == 0 { idleSince = idleSince ?? Date() } else { idleSince = nil }
@@ -658,7 +913,7 @@ do {
     if arguments.contains("--check-config") { print("原生配置检查通过：\(sorter.configURL.path)"); exit(0) }
     let isDirectMove = arguments.contains("--move-once") || arguments.contains("--move-many")
     let isUndo = arguments.contains("--undo") || arguments.contains("--undo-batch")
-    // 待分类文件本身没有命中自动规则，直接移动无需等待事件监听进程退出。
+    // 收件箱文件本身没有命中自动规则，直接移动无需等待事件监听进程退出。
     // 使用独立锁只阻止两个手动移动互相冲突，修复批量移动和最近目录偶发无响应。
     // 撤销使用独立锁避免与 --run（LaunchAgent 触发）冲突：撤销把文件移回 Downloads，
     // LaunchAgent 检测到目录变化后立即触发 --run，两者共用 sorter.lock 会导致撤销受阻。

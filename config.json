@@ -48,8 +48,8 @@
     ".pkg"
   ],
   "organization_mode": "review",
-  "retention_days": 7,
-  "recent_modification_protection_hours": 24,
+  "retention_days": 0,
+  "recent_modification_protection_hours": 0,
   "automatic_scan_interval_hours": 24,
   "excluded_paths": [],
   "rules": [

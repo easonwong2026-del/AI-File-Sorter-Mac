@@ -21,7 +21,6 @@ body:
       options:
         - Released App
         - Built from source
-        - Python compatibility scripts
     validations:
       required: true
   - type: textarea

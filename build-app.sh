@@ -18,21 +18,56 @@ if ! command -v swiftc >/dev/null 2>&1; then
     exit 1
 fi
 
-# 某些 macOS 同时保留多个 SDK；选择最早的完整 SDK，可兼容 macOS 13+，并避开预览版 SDK 小版本不一致。
-SDK_PATH="$(find "$(xcode-select -p)/SDKs" -maxdepth 1 -type d -name 'MacOSX*.sdk' | sort | head -1)"
+# 某些 macOS 同时保留多个 SDK；兼容 CommandLineTools、Xcode 以及 GitHub-hosted runner 的目录布局。
+SDK_PATH=""
+if XCODE_ROOT="$(xcode-select -p 2>/dev/null)"; then
+    for SDK_ROOT in \
+        "$XCODE_ROOT/SDKs" \
+        "$XCODE_ROOT/Platforms/MacOSX.platform/Developer/SDKs" \
+        "$XCODE_ROOT/Toolchains/XcodeDefault.xctoolchain/SDKs"; do
+        if [ -d "$SDK_ROOT" ]; then
+            SDK_PATH="$(find "$SDK_ROOT" -maxdepth 1 -type d -name 'MacOSX*.sdk' | sort | head -1)"
+            [ -n "$SDK_PATH" ] && break
+        fi
+    done
+fi
+if [ -z "$SDK_PATH" ]; then
+    SDK_PATH="$(find /Applications -path '*/Platforms/MacOSX.platform/Developer/SDKs/MacOSX*.sdk' -type d 2>/dev/null | sort | head -1)"
+fi
+if [ -z "$SDK_PATH" ] && command -v xcrun >/dev/null 2>&1; then
+    SDK_PATH="$(xcrun --sdk macosx --show-sdk-path 2>/dev/null || true)"
+fi
+if [ -z "$SDK_PATH" ] || [ ! -d "$SDK_PATH" ]; then
+    echo "找不到 macOS SDK，请确认已安装 Xcode Command Line Tools 或 Xcode。"
+    exit 1
+fi
 MODULE_CACHE="$BUILD_DIR/module-cache"
 mkdir -p "$MODULE_CACHE"
 export CLANG_MODULE_CACHE_PATH="$MODULE_CACHE"
 export SWIFT_MODULE_CACHE_PATH="$MODULE_CACHE"
 
 # 分别构建 Apple Silicon 与 Intel，再合并为一个通用应用。
+APP_SOURCES=(
+    "$PROJECT_DIR/mac-app/Sources/App/AIFileSorterApplication.swift"
+    "$PROJECT_DIR/mac-app/Sources/App/WelcomeAndMain.swift"
+    "$PROJECT_DIR/mac-app/Sources/Models/SorterModels.swift"
+    "$PROJECT_DIR/mac-app/Sources/Services/AppModel.swift"
+    "$PROJECT_DIR/mac-app/Sources/Views/SharedViews.swift"
+    "$PROJECT_DIR/mac-app/Sources/Views/OverviewView.swift"
+    "$PROJECT_DIR/mac-app/Sources/Views/InboxView.swift"
+    "$PROJECT_DIR/mac-app/Sources/Views/OrganizingPlanView.swift"
+    "$PROJECT_DIR/mac-app/Sources/Views/RulesView.swift"
+    "$PROJECT_DIR/mac-app/Sources/Views/HistoryView.swift"
+    "$PROJECT_DIR/mac-app/Sources/Views/SidebarView.swift"
+)
+
 for ARCH in arm64 x86_64; do
     swiftc -swift-version 5 -Osize -parse-as-library -sdk "$SDK_PATH" -target "$ARCH-apple-macosx13.0" \
         -framework SwiftUI -framework AppKit -framework QuickLookUI \
-        "$PROJECT_DIR/mac-app/Sources/AIFileSorterApp.swift" -o "$BUILD_DIR/AIFileSorter-$ARCH"
+        "${APP_SOURCES[@]}" -o "$BUILD_DIR/AIFileSorter-$ARCH"
     swiftc -swift-version 5 -Osize -sdk "$SDK_PATH" -target "$ARCH-apple-macosx13.0" \
         -framework CryptoKit \
-        "$PROJECT_DIR/mac-app/Sources/AIFileSorterAgent.swift" -o "$BUILD_DIR/AIFileSorterAgent-$ARCH"
+        "$PROJECT_DIR/mac-app/Sources/Agent/AIFileSorterAgent.swift" -o "$BUILD_DIR/AIFileSorterAgent-$ARCH"
 done
 lipo -create "$BUILD_DIR/AIFileSorter-arm64" "$BUILD_DIR/AIFileSorter-x86_64" -output "$BUILD_DIR/AIFileSorter"
 lipo -create "$BUILD_DIR/AIFileSorterAgent-arm64" "$BUILD_DIR/AIFileSorterAgent-x86_64" -output "$BUILD_DIR/AIFileSorterAgent"

@@ -1,0 +1,24 @@
+name: Native macOS
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    # macOS 13 is retired on GitHub-hosted runners. Keep Intel coverage because
+    # build-app.sh produces both arm64 and x86_64 slices.
+    runs-on: macos-15-intel
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build native app
+        run: ./build-app.sh
+
+      - name: Run native Agent tests
+        run: ./tests/test_native_agent.sh
