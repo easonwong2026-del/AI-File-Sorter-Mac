@@ -15,15 +15,15 @@ struct WelcomeView: View {
                     .font(.system(size: 42)).foregroundStyle(Color.accentColor)
                 VStack(alignment: .leading, spacing: 4) {
                     Text("欢迎使用 AI File Sorter").font(.title.bold())
-                    Text("先处理待分类文件，再把重复动作变成自动化规则。")
+                    Text("先查看收件箱，再选择适合你的整理方式。")
                         .foregroundStyle(.secondary)
                 }
             }
 
             VStack(alignment: .leading, spacing: 16) {
-                Label("“待分类”支持一次性移动，也能顺手建立长期规则。", systemImage: "1.circle.fill")
-                Label("内置规则是图片、视频、压缩包等通用方案，可随时修改。", systemImage: "2.circle.fill")
-                Label("也可以让外部 AI 根据你的目录生成 JSON，再从规则页导入。", systemImage: "3.circle.fill")
+                Label("收件箱会列出监听目录第一层的普通文件，并说明可整理、等待、跳过或未匹配的原因。", systemImage: "1.circle.fill")
+                Label("你可以选择只提供整理建议、整理前确认，或自动整理；三种方式不会改变收件箱展示。", systemImage: "2.circle.fill")
+                Label("整理前可快速预览文件或在 Finder 中定位；已有文件不会被覆盖。", systemImage: "3.circle.fill")
             }
 
             GroupBox {
@@ -64,27 +64,24 @@ struct AIFileSorterApplication: App {
             }
 
         MenuBarExtra("AI File Sorter", systemImage: model.automationEnabled ? "folder.fill.badge.checkmark" : "folder.badge.gearshape") {
-            Text(model.runtimeState.title)
-            Text((OrganizationMode(rawValue: model.config.organizationMode) ?? .review).title)
+            Text(model.serviceStatus.title)
+            Text("收件箱：\(model.inboxFileCount) 个文件")
                 .font(.caption).foregroundStyle(.secondary)
             Divider()
-            Button("立即扫描（不移动）") { model.scanOnly() }
-                .disabled(model.busy)
-            Button("立即整理现有文件") { model.sortExistingNow() }
+            Button("立即扫描") { model.scanOnly() }
                 .disabled(model.busy)
             if model.automationEnabled {
-                Button("停止整理") { model.stopAutomation() }
+                Button("暂停自动整理") { model.stopAutomation() }
             } else {
-                Button("开始整理") { model.installAndStart() }
+                Button("开始自动整理") { model.installAndStart() }
             }
-            Button("打开主窗口") {
+            Button("打开监听文件夹") { model.openDownloadsFolder() }
+            Button("打开应用") {
                 NSApp.activate(ignoringOtherApps: true)
                 NSApp.windows.first?.makeKeyAndOrderFront(nil)
             }
-            Button("打开 Downloads") { model.openDownloadsFolder() }
             Divider()
-            Button("退出控制面板") { NSApp.terminate(nil) }
+            Button("退出") { NSApp.terminate(nil) }
         }
     }
 }
-

@@ -5,6 +5,53 @@ import Darwin
 @preconcurrency import QuickLookUI
 import SwiftUI
 
+enum AppServiceStatus: String {
+    case notEnabled
+    case running
+    case scanning
+    case awaitingConfirmation
+    case organizing
+    case paused
+    case configNotSynced
+    case permissionError
+    case agentError
+
+    var title: String {
+        switch self {
+        case .notEnabled: return "未启用"
+        case .running: return "正常运行"
+        case .scanning: return "扫描中"
+        case .awaitingConfirmation: return "等待确认"
+        case .organizing: return "整理中"
+        case .paused: return "已暂停"
+        case .configNotSynced: return "配置不同步"
+        case .permissionError: return "权限异常"
+        case .agentError: return "整理服务错误"
+        }
+    }
+
+    var isActive: Bool {
+        switch self {
+        case .running, .scanning, .awaitingConfirmation, .organizing: return true
+        case .notEnabled, .paused, .configNotSynced, .permissionError, .agentError: return false
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .notEnabled: return "后台不会自动扫描或移动文件。"
+        case .running: return "后台服务已加载，按当前方式工作。"
+        case .scanning: return "正在读取文件状态。"
+        case .awaitingConfirmation: return "整理建议已生成，等待你确认。"
+        case .organizing: return "正在执行已确认的文件操作。"
+        case .paused: return "后台服务已暂停。"
+        case .configNotSynced: return "服务配置与当前设置不一致。"
+        case .permissionError: return "监听目录或目标目录权限异常。"
+        case .agentError: return "原生整理引擎报告了错误。"
+        }
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     // 始终提供可编辑配置，资源部署失败时按钮也不会静默失效。
@@ -13,6 +60,7 @@ final class AppModel: ObservableObject {
     }
     @Published private(set) var hasUnsavedChanges = false
     @Published private(set) var runtimeState: SorterRuntimeState = .stopped
+    @Published private(set) var serviceStatus: AppServiceStatus = .notEnabled
     @Published var busy = false
     @Published var message = "正在准备…"
     @Published var logText = "暂无日志"
@@ -27,7 +75,15 @@ final class AppModel: ObservableObject {
     @Published var ruleDiagnostics = "尚未检查规则"
     @Published var showQuitConfirmation = false
 
-    var automationEnabled: Bool { runtimeState.isServiceEnabled }
+    var automationEnabled: Bool { serviceStatus.isActive }
+
+    var inboxFileCount: Int {
+        let folder = URL(fileURLWithPath: NSString(string: config.watchFolder).expandingTildeInPath, isDirectory: true)
+        let urls = (try? FileManager.default.contentsOfDirectory(
+            at: folder, includingPropertiesForKeys: [.isRegularFileKey], options: []
+        )) ?? []
+        return urls.count { (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true }
+    }
 
     let applicationSupportDirectory: URL
     let engineDirectory: URL
@@ -40,6 +96,7 @@ final class AppModel: ObservableObject {
     private var pendingWatchedPath = ""
     private var pendingRefreshWorkItem: DispatchWorkItem?
     private var savedConfigData = Data()
+    private var lastAgentError = ""
 
     init() {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -196,26 +253,91 @@ final class AppModel: ObservableObject {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         config.configVersion = 9
+        let previousConfigData = savedConfigData.isEmpty
+            ? (try? Data(contentsOf: configURL)) ?? Data()
+            : savedConfigData
+        let previousConfig = try? JSONDecoder().decode(SorterConfig.self, from: previousConfigData)
+        let launchAgentNeedsSync = previousConfig == nil
+            || previousConfig?.watchFolder != config.watchFolder
+            || previousConfig?.organizationMode != config.organizationMode
+            || previousConfig?.automaticScanIntervalHours != config.automaticScanIntervalHours
+        let launchAgentBeforeSave = inspectLaunchAgent()
+        var didSyncLaunchAgent = false
         if FileManager.default.fileExists(atPath: configURL.path) && !recoveredFromBackup {
             let backup = configURL.deletingLastPathComponent().appendingPathComponent("config.backup.json")
             try? FileManager.default.removeItem(at: backup)
             try FileManager.default.copyItem(at: configURL, to: backup)
         }
-        try encoder.encode(config).write(to: configURL, options: .atomic)
+        let newConfigData = try encoder.encode(config)
+        do {
+            try newConfigData.write(to: configURL, options: .atomic)
+            if launchAgentNeedsSync && (launchAgentBeforeSave.plistExists || launchAgentBeforeSave.loaded) {
+                let result = Self.installNativeAgent(
+                    agentURL: launchAgentURL,
+                    configURL: configURL,
+                    watchPath: expandedWatchPath,
+                    organizationMode: config.organizationMode,
+                    automaticScanIntervalHours: config.automaticScanIntervalHours,
+                    bootstrap: launchAgentBeforeSave.loaded
+                )
+                guard result.status == 0 else {
+                    throw NSError(
+                        domain: "AIFileSorter",
+                        code: 31,
+                        userInfo: [NSLocalizedDescriptionKey: "后台服务同步失败：\(cleanProcessOutput(result.output))"]
+                    )
+                }
+                didSyncLaunchAgent = true
+            }
+        } catch {
+            if !previousConfigData.isEmpty {
+                try? previousConfigData.write(to: configURL, options: .atomic)
+            }
+            if let previousConfig {
+                config = previousConfig
+            }
+            captureSavedConfig()
+            refreshPendingFiles()
+            startPendingWatcher(force: true)
+            lastAgentError = error.localizedDescription
+            if launchAgentNeedsSync && (launchAgentBeforeSave.plistExists || launchAgentBeforeSave.loaded) {
+                setServiceStatus(.agentError, detail: "配置未应用，已保留上次保存的配置")
+                message = "同步失败，已保留原配置：\(error.localizedDescription)"
+            }
+            throw error
+        }
         recoveredFromBackup = false
         captureSavedConfig()
         refreshPendingFiles()
-        startPendingWatcher()
-        if showConfirmation { message = "设置已保存；修改监听文件夹后请点击“重新安装并启动”" }
+        startPendingWatcher(force: true)
+        refreshStatus()
+        if showConfirmation {
+            message = didSyncLaunchAgent
+                ? "设置已保存，后台服务已自动同步"
+                : (launchAgentBeforeSave.loaded ? "设置已保存；普通规则变化仅写入配置" : "设置已保存；自动整理尚未启用")
+        }
     }
 
     func refreshStatus() {
         guard !busy else { return }
-        let result = Self.runProcess(
-            executable: "/bin/launchctl",
-            arguments: ["print", "gui/\(getuid())/com.ai.filesorter"]
-        )
-        runtimeState = result.status == 0 ? .running : .stopped
+        let inspection = inspectLaunchAgent()
+        if !watchFolderIsUsable {
+            setServiceStatus(.permissionError, detail: "监听目录不可读写")
+        } else if (inspection.plistExists || inspection.loaded) && !inspection.agentAvailable {
+            setServiceStatus(.agentError, detail: inspection.agentError)
+        } else if inspection.plistExists && !inspection.matchesCurrentConfiguration {
+            setServiceStatus(.configNotSynced, detail: "后台服务尚未使用当前配置")
+        } else if inspection.loaded {
+            if let error = inspection.launchctlError {
+                lastAgentError = error
+                setServiceStatus(.agentError, detail: error)
+            } else {
+                lastAgentError = ""
+                setServiceStatus(.running)
+            }
+        } else {
+            setServiceStatus(.notEnabled)
+        }
     }
 
     // 识别 2.0.1 及更早版本指向 Application Support 副本的服务，打开新版时自动迁移。
@@ -227,35 +349,52 @@ final class AppModel: ObservableObject {
               let arguments = plist["ProgramArguments"] as? [String], let executable = arguments.first else {
             return true
         }
-        return URL(fileURLWithPath: executable).standardizedFileURL != bundledAgentURL.standardizedFileURL
+        return URL(fileURLWithPath: executable).standardizedFileURL != launchAgentURL.standardizedFileURL
     }
 
     func installAndStart() {
         guard Bundle.main.bundleURL.standardizedFileURL.path == "/Applications/AI File Sorter.app" else {
             message = "请先把 AI File Sorter.app 移到系统“应用程序”文件夹，再安装自动整理服务"
+            setServiceStatus(.agentError, detail: "App 不在固定路径")
             return
         }
+        let previousConfigData = savedConfigData
         do { try saveConfig(showConfirmation: false) }
         catch { message = "保存失败：\(error.localizedDescription)"; return }
-        let watchPath = NSString(string: config.watchFolder).expandingTildeInPath
-        let agentURL = bundledAgentURL
+        let watchPath = expandedWatchPath
+        let agentURL = launchAgentURL
         let organizationMode = config.organizationMode
         let automaticScanIntervalHours = config.automaticScanIntervalHours
-        runBackground(title: "正在安装并启用原生自动整理…") { [configURL] in
+        setServiceStatus(.paused, detail: "正在加载后台服务")
+        runBackground(title: "正在安装并启用原生自动整理…", operation: { [configURL] in
             Self.installNativeAgent(
                 agentURL: agentURL,
                 configURL: configURL,
                 watchPath: watchPath,
                 organizationMode: organizationMode,
-                automaticScanIntervalHours: automaticScanIntervalHours
+                automaticScanIntervalHours: automaticScanIntervalHours,
+                bootstrap: true
             )
-        }
+        }, completion: { [weak self] result in
+            guard let self else { return }
+            if result.status != 0, !previousConfigData.isEmpty {
+                try? previousConfigData.write(to: self.configURL, options: .atomic)
+                try? self.loadConfig()
+                self.captureSavedConfig()
+                self.refreshPendingFiles()
+                self.startPendingWatcher(force: true)
+                self.message = "启用失败，已保留原配置：\(self.cleanProcessOutput(result.output))"
+            }
+        })
     }
 
     func stopAutomation() {
-        runBackground(title: "正在停止自动整理…") {
+            setServiceStatus(.paused, detail: "正在停止后台服务")
+        runBackground(title: "正在停止自动整理…", operation: {
             Self.runProcess(executable: "/bin/launchctl", arguments: ["bootout", "gui/\(getuid())/com.ai.filesorter"])
-        }
+        }, completion: { [weak self] result in
+            if result.status == 0 { self?.setServiceStatus(.notEnabled) }
+        })
     }
 
     func sortExistingNow() {
@@ -276,9 +415,13 @@ final class AppModel: ObservableObject {
 
     func scanOnly() {
         guard !busy else { return }
-        runtimeState = .scanning
+        setServiceStatus(.scanning)
         generateOrganizingPlan()
-        runtimeState = organizingPlan.isEmpty ? (automationEnabled ? .running : .stopped) : .awaitingConfirmation
+        if organizingPlan.isEmpty {
+            refreshStatus()
+        } else {
+            setServiceStatus(.awaitingConfirmation)
+        }
         showOrganizingPlan = true
     }
 
@@ -288,15 +431,20 @@ final class AppModel: ObservableObject {
         completion: ((ProcessResult) -> Void)? = nil
     ) {
         busy = true
-        if title.contains("扫描") { runtimeState = .scanning }
-        else if title.contains("整理") || title.contains("移动") || title.contains("撤销") { runtimeState = .organizing }
+        if title.contains("扫描") { setServiceStatus(.scanning) }
+        else if title.contains("整理") || title.contains("移动") || title.contains("撤销") { setServiceStatus(.organizing) }
         message = title
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let result = operation()
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.busy = false
-                self.refreshStatus()
+                if result.status == 0 {
+                    self.refreshStatus()
+                } else {
+                    self.lastAgentError = self.cleanProcessOutput(result.output)
+                    self.setServiceStatus(.agentError, detail: self.lastAgentError)
+                }
                 self.refreshLog()
                 self.refreshPendingFiles()
                 self.refreshHistory()
@@ -317,24 +465,196 @@ final class AppModel: ObservableObject {
             .appendingPathComponent("com.ai.filesorter.agent")
     }
 
-    // 待分类是常驻收件箱，不弹窗；保留用户尚未保存的关键词和目标编辑。
+    private var fixedAppURL: URL {
+        URL(fileURLWithPath: "/Applications/AI File Sorter.app", isDirectory: true)
+    }
+
+    private var launchAgentURL: URL {
+        fixedAppURL
+            .appendingPathComponent("Contents/Library/LaunchServices", isDirectory: true)
+            .appendingPathComponent("com.ai.filesorter.agent")
+    }
+
+    private var launchAgentPlistURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/com.ai.filesorter.plist")
+    }
+
+    private var expandedWatchPath: String {
+        URL(fileURLWithPath: NSString(string: config.watchFolder).expandingTildeInPath)
+            .standardizedFileURL.path
+    }
+
+    private var watchFolderIsUsable: Bool {
+        var isDirectory = ObjCBool(false)
+        let manager = FileManager.default
+        guard manager.fileExists(atPath: expandedWatchPath, isDirectory: &isDirectory), isDirectory.boolValue else {
+            return false
+        }
+        return manager.isReadableFile(atPath: expandedWatchPath) && manager.isWritableFile(atPath: expandedWatchPath)
+    }
+
+    private struct LaunchAgentInspection {
+        let plistExists: Bool
+        let plistReadable: Bool
+        let loaded: Bool
+        let plist: [String: Any]
+        let launchctlOutput: String
+        let launchctlError: String?
+        let agentAvailable: Bool
+        let agentError: String
+        let labelMatches: Bool
+        let argumentsMatch: Bool
+        let configPathMatches: Bool
+        let watchPathsMatch: Bool
+        let startIntervalMatches: Bool
+
+        var matchesCurrentConfiguration: Bool {
+            plistReadable && labelMatches && argumentsMatch && configPathMatches
+                && watchPathsMatch && startIntervalMatches
+        }
+    }
+
+    private func inspectLaunchAgent() -> LaunchAgentInspection {
+        let manager = FileManager.default
+        let plistURL = launchAgentPlistURL
+        let plistExists = manager.fileExists(atPath: plistURL.path)
+        var plist: [String: Any] = [:]
+        let plistReadable: Bool
+        if let data = try? Data(contentsOf: plistURL),
+           let decoded = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] {
+            plist = decoded
+            plistReadable = true
+        } else {
+            plistReadable = !plistExists
+        }
+
+        let launchctl = Self.runProcess(
+            executable: "/bin/launchctl",
+            arguments: ["print", "gui/\(getuid())/com.ai.filesorter"]
+        )
+        let expectedArguments = [launchAgentURL.path, "--config", configURL.path]
+        let actualArguments = plist["ProgramArguments"] as? [String] ?? []
+        let expectedWatchPaths = [expandedWatchPath, configURL.path].sorted()
+        let actualWatchPaths = ((plist["WatchPaths"] as? [String]) ?? []).sorted()
+        let expectedStartInterval = config.organizationMode == "automatic" && config.automaticScanIntervalHours > 0
+            ? max(60, config.automaticScanIntervalHours * 3_600)
+            : nil
+        let actualStartInterval = (plist["StartInterval"] as? NSNumber)?.intValue
+            ?? (plist["StartInterval"] as? Int)
+        let startIntervalMatches = expectedStartInterval == actualStartInterval
+        let agentAvailable = manager.isExecutableFile(atPath: launchAgentURL.path)
+        let agentError: String
+        if !agentAvailable {
+            agentError = "固定应用内找不到可执行整理组件：\(launchAgentURL.path)"
+        } else if let launchctlError = Self.launchctlLastExitError(launchctl.output), launchctl.status == 0 {
+            agentError = launchctlError
+        } else {
+            agentError = ""
+        }
+        return LaunchAgentInspection(
+            plistExists: plistExists,
+            plistReadable: plistReadable,
+            loaded: launchctl.status == 0,
+            plist: plist,
+            launchctlOutput: launchctl.output,
+            launchctlError: Self.launchctlLastExitError(launchctl.output),
+            agentAvailable: agentAvailable,
+            agentError: agentError,
+            labelMatches: (plist["Label"] as? String) == "com.ai.filesorter",
+            argumentsMatch: actualArguments == expectedArguments,
+            configPathMatches: actualArguments.count >= 3 && actualArguments[2] == configURL.path,
+            watchPathsMatch: actualWatchPaths == expectedWatchPaths,
+            startIntervalMatches: startIntervalMatches
+        )
+    }
+
+    private func setServiceStatus(_ status: AppServiceStatus, detail: String? = nil) {
+        serviceStatus = status
+        switch status {
+        case .notEnabled:
+            runtimeState = .stopped
+        case .running:
+            runtimeState = .running
+        case .scanning:
+            runtimeState = .scanning
+        case .awaitingConfirmation:
+            runtimeState = .awaitingConfirmation
+        case .organizing:
+            runtimeState = .organizing
+        case .paused:
+            runtimeState = .temporarilyPaused
+        case .configNotSynced, .permissionError, .agentError:
+            runtimeState = .error
+        }
+        if let detail, !detail.isEmpty {
+            message = "状态：\(status.title)；\(detail)"
+        }
+    }
+
+    private func cleanProcessOutput(_ output: String) -> String {
+        let cleaned = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? "没有返回详细错误" : String(cleaned.suffix(1_000))
+    }
+
+    private func targetPermissionProblems() -> [String] {
+        let manager = FileManager.default
+        return config.rules.enumerated().compactMap { index, rule in
+            let raw = rule.target.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !raw.isEmpty else { return "规则 \(index + 1) 目标为空" }
+            let target = URL(fileURLWithPath: NSString(string: raw).expandingTildeInPath).standardizedFileURL
+            var isDirectory = ObjCBool(false)
+            if manager.fileExists(atPath: target.path, isDirectory: &isDirectory) {
+                guard isDirectory.boolValue && manager.isWritableFile(atPath: target.path) else {
+                    return "规则 \(index + 1)：\(target.path) 不可写"
+                }
+                return nil
+            }
+            var parent = target.deletingLastPathComponent()
+            while !manager.fileExists(atPath: parent.path), parent.path != "/" {
+                parent.deleteLastPathComponent()
+            }
+            return manager.isWritableFile(atPath: parent.path) ? nil : "规则 \(index + 1)：\(target.path) 的父目录不可写"
+        }
+    }
+
+    private func recentErrorSummary(launchctlError: String?) -> String? {
+        var errors: [String] = []
+        if let launchctlError { errors.append(launchctlError) }
+        let files = [
+            logsDirectory.appendingPathComponent("launchd.err.log"),
+            logsDirectory.appendingPathComponent("sorter.log"),
+        ]
+        for url in files {
+            guard let data = try? Data(contentsOf: url) else { continue }
+            let content = String(decoding: data.suffix(20_000), as: UTF8.self)
+            let matches = content.split(whereSeparator: \.isNewline).filter { line in
+                let lower = line.lowercased()
+                return lower.contains("error") || lower.contains("failed") || lower.contains("failure")
+                    || line.contains("失败") || line.contains("错误") || line.contains("权限")
+            }
+            errors.append(contentsOf: matches.suffix(3).map(String.init))
+        }
+        guard !errors.isEmpty else { return nil }
+        return errors.suffix(4).joined(separator: " | ")
+    }
+
+    // 收件箱是常驻列表，不弹窗；保留用户尚未保存的关键词和目标编辑。
     func refreshPendingFiles() {
         guard !busy else { return }
         let folder = URL(fileURLWithPath: NSString(string: config.watchFolder).expandingTildeInPath, isDirectory: true)
         let files = supportedFiles(in: folder)
         let ignored = Set(UserDefaults.standard.stringArray(forKey: ignoredDefaultsKey) ?? [])
         let existing = Dictionary(uniqueKeysWithValues: pendingFiles.map { ($0.path, $0) })
-        let mode = OrganizationMode(rawValue: config.organizationMode) ?? .review
-        pendingFiles = files.lazy.filter { self.fileEligibility($0) == .eligible }
-            .filter {
-                switch mode {
-                case .review: return self.matchesAnyRule(fileURL: $0)
-                case .manual, .automatic: return !self.matchesAnyRule(fileURL: $0)
-                }
+        // 收件箱是稳定的“当前文件”视图，不能随整理模式或保留期把文件隐藏。
+        // 临时后缀、隐藏文件和不支持类型仍由原生 Agent 拒绝，视图会展示其原因。
+        pendingFiles = files.prefix(300).map { file in
+            let isIgnored = ignored.contains(fileSignatureKey(file))
+            if var preserved = existing[file.path] {
+                preserved.ignored = isIgnored
+                if isIgnored { preserved.selected = false }
+                return preserved
             }
-            .filter { !ignored.contains(self.fileSignatureKey($0)) }
-            .prefix(200).map { file in
-            if let preserved = existing[file.path] { return preserved }
             let match = matchingRule(fileURL: file)
             let keyword = match?.element.keywords.first(where: {
                 file.lastPathComponent.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) != nil
@@ -343,7 +663,9 @@ final class AppModel: ObservableObject {
                 path: file.path,
                 fileName: file.lastPathComponent,
                 keyword: keyword,
-                target: match?.element.target ?? "~/Documents/资料库/\(keyword)"
+                target: match?.element.target ?? "~/Documents/资料库/\(keyword)",
+                selected: !isIgnored,
+                ignored: isIgnored
             )
         }
     }
@@ -490,7 +812,7 @@ final class AppModel: ObservableObject {
         let name = ruleTestFileName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { ruleTestResult = "请输入一个文件名"; return }
         guard let match = matchingRule(fileName: name) else {
-            ruleTestResult = "未匹配任何启用的规则，文件会进入待分类。"
+            ruleTestResult = "未匹配任何启用的规则，文件会进入收件箱。"
             return
         }
         let rule = match.element
@@ -678,7 +1000,7 @@ final class AppModel: ObservableObject {
     // 单文件、批量文件和最近目录都从这里进入统一确认流程。
     func beginPendingMove(paths: [String], preferredTarget: String? = nil) {
         let items = paths.compactMap { path in pendingFiles.first(where: { $0.path == path }) }
-        guard !items.isEmpty else { message = "请选择仍在待分类列表中的文件"; return }
+        guard !items.isEmpty else { message = "请选择仍在收件箱中的文件"; return }
         let keywords = Set(items.map { $0.keyword.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
         let commonKeyword = keywords.count == 1 ? keywords.first ?? "" : (items.count == 1 ? items[0].keyword : "")
         pendingMoveDraft = PendingMoveDraft(
@@ -901,30 +1223,80 @@ final class AppModel: ObservableObject {
     }
 
     func runHealthCheck() {
-        var rows: [String] = []
-        let agent = bundledAgentURL
-        let native = Self.runProcess(executable: agent.path, arguments: ["--config", configURL.path, "--check-config"])
-        rows.append(native.status == 0 ? "✓ 原生整理引擎从 App 固定位置运行" : "✕ 原生整理引擎不可用，请重新安装 App")
-
-        let installed = Bundle.main.bundleURL.path == "/Applications/AI File Sorter.app"
-        rows.append(installed ? "✓ App 已安装在固定位置 /Applications" : "△ 建议将 App 移到 /Applications 后重新安装服务")
-
         let manager = FileManager.default
-        let watchPath = NSString(string: config.watchFolder).expandingTildeInPath
-        let watchOK = manager.isReadableFile(atPath: watchPath) && manager.isWritableFile(atPath: watchPath)
-        rows.append(watchOK ? "✓ 监听文件夹可读写：\(watchPath)" : "✕ 监听文件夹不可读写：\(watchPath)")
+        let inspection = inspectLaunchAgent()
+        var rows: [String] = []
+        let fixedAppExists = manager.fileExists(atPath: fixedAppURL.path)
+        let runningFromFixedApp = Bundle.main.bundleURL.standardizedFileURL == fixedAppURL.standardizedFileURL
+        rows.append(runningFromFixedApp && fixedAppExists
+            ? "✓ 应用位于固定路径：\(fixedAppURL.path)"
+            : "✕ 应用必须从固定路径运行：\(fixedAppURL.path)")
 
-        var unavailableTargets = 0
-        for rule in config.rules {
-            let target = NSString(string: rule.target).expandingTildeInPath
-            var probe = URL(fileURLWithPath: target, isDirectory: true)
-            while !manager.fileExists(atPath: probe.path), probe.path != "/" { probe.deleteLastPathComponent() }
-            if !manager.isWritableFile(atPath: probe.path) { unavailableTargets += 1 }
+        rows.append(inspection.agentAvailable
+            ? "✓ 原生整理组件可执行"
+            : "✕ 原生整理组件不可用：\(inspection.agentError)")
+        if fixedAppExists && inspection.agentAvailable {
+            let native = Self.runProcess(executable: launchAgentURL.path, arguments: ["--config", configURL.path, "--check-config"])
+            rows.append(native.status == 0
+                ? "✓ 整理组件配置检查通过"
+                : "✕ 整理组件配置检查失败：\(cleanProcessOutput(native.output))")
+        } else {
+            rows.append("△ 未执行整理组件检查：固定应用或整理组件不可用")
         }
-        rows.append(unavailableTargets == 0 ? "✓ 所有规则的目标路径可创建或写入" : "✕ \(unavailableTargets) 条规则的目标路径没有写入权限")
+
+        rows.append(inspection.plistExists && inspection.plistReadable
+            ? "✓ 后台服务配置存在"
+            : "△ 后台服务配置未加载或不可读")
+        rows.append(inspection.loaded ? "✓ 后台服务已加载" : "△ 后台服务当前未加载")
+
+        let arguments = (inspection.plist["ProgramArguments"] as? [String] ?? []).joined(separator: " ")
+        rows.append(inspection.argumentsMatch
+            ? "✓ 后台服务启动路径正确"
+            : "✕ 后台服务启动路径不匹配：\(arguments.isEmpty ? "缺失" : arguments)")
+        rows.append(inspection.configPathMatches
+            ? "✓ 后台服务使用当前配置"
+            : "✕ 后台服务配置路径不匹配")
+
+        let watchPaths = (inspection.plist["WatchPaths"] as? [String] ?? []).joined(separator: "、")
+        rows.append(inspection.watchPathsMatch
+            ? "✓ 监听目录配置正确"
+            : "✕ 监听目录配置不匹配：\(watchPaths.isEmpty ? "缺失" : watchPaths)")
+
+        let expectedInterval = config.organizationMode == "automatic" && config.automaticScanIntervalHours > 0
+            ? max(60, config.automaticScanIntervalHours * 3_600)
+            : nil
+        let actualInterval = (inspection.plist["StartInterval"] as? NSNumber)?.intValue
+            ?? (inspection.plist["StartInterval"] as? Int)
+        let intervalText = expectedInterval.map(String.init) ?? "未设置"
+        let actualIntervalText = actualInterval.map(String.init) ?? "未设置"
+        rows.append(inspection.startIntervalMatches
+            ? "✓ 定期检查间隔：\(intervalText) 秒"
+            : "✕ 定期检查间隔不匹配：当前 \(actualIntervalText)，期望 \(intervalText)")
+
+        rows.append(watchFolderIsUsable
+            ? "✓ 监听目录可读写：\(expandedWatchPath)"
+            : "✕ 监听目录不可读写：\(expandedWatchPath)")
+        let targetProblems = targetPermissionProblems()
+        rows.append(targetProblems.isEmpty
+            ? "✓ 所有规则目标路径可创建或写入"
+            : "✕ 目标路径权限异常：\(targetProblems.joined(separator: "；"))")
+
+        if let recentErrors = recentErrorSummary(launchctlError: inspection.launchctlError) {
+            rows.append("✕ 最近错误：\(recentErrors)")
+        } else {
+            rows.append("✓ 最近错误：未发现")
+        }
 
         refreshStatus()
-        rows.append(automationEnabled ? "✓ 自动整理服务已加载" : "△ 自动整理服务尚未加载")
+        if let nativeFailure = rows.first(where: { $0.hasPrefix("✕ 整理组件配置检查失败") }) {
+            lastAgentError = nativeFailure
+            setServiceStatus(.agentError, detail: nativeFailure)
+        } else if !targetProblems.isEmpty || !watchFolderIsUsable {
+            setServiceStatus(.permissionError, detail: "请检查监听目录和规则目标路径权限")
+        } else if inspection.plistExists && !inspection.matchesCurrentConfiguration {
+            setServiceStatus(.configNotSynced, detail: "后台服务配置与当前设置不一致")
+        }
+        rows.append("当前服务状态：\(serviceStatus.title)")
         healthReport = rows.joined(separator: "\n")
         message = rows.contains(where: { $0.hasPrefix("✕") }) ? "自检发现需要处理的问题" : "环境与权限检查完成"
     }
@@ -967,12 +1339,30 @@ final class AppModel: ObservableObject {
         }
     }
 
+    nonisolated private static func launchctlLastExitError(_ output: String) -> String? {
+        for line in output.split(whereSeparator: \.isNewline) {
+            let lower = line.lowercased()
+            guard lower.contains("last exit code") else { continue }
+            guard let equal = line.firstIndex(of: "=") else { return String(line).trimmingCharacters(in: .whitespaces) }
+            let value = line[line.index(after: equal)...]
+                .trimmingCharacters(in: .whitespaces)
+                .split(whereSeparator: { $0 == "," || $0 == " " || $0 == "\t" })
+                .first
+            if let value, let code = Int(value), code != 0 {
+                return "后台服务最近一次退出码：\(code)"
+            }
+            return nil
+        }
+        return nil
+    }
+
     nonisolated private static func installNativeAgent(
         agentURL: URL,
         configURL: URL,
         watchPath: String,
         organizationMode: String,
-        automaticScanIntervalHours: Int
+        automaticScanIntervalHours: Int,
+        bootstrap: Bool
     ) -> ProcessResult {
         let manager = FileManager.default
         let agents = manager.homeDirectoryForCurrentUser.appendingPathComponent("Library/LaunchAgents", isDirectory: true)
@@ -996,19 +1386,38 @@ final class AppModel: ObservableObject {
                 plist["StartInterval"] = max(60, automaticScanIntervalHours * 3_600)
             }
             let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+            let previousPlistData = try? Data(contentsOf: plistURL)
+            let wasLoaded = runProcess(
+                executable: "/bin/launchctl",
+                arguments: ["print", "gui/\(getuid())/com.ai.filesorter"]
+            ).status == 0
             try data.write(to: plistURL, options: .atomic)
+            guard bootstrap else {
+                return ProcessResult(status: 0, output: "后台服务配置已同步；服务当前未启用。")
+            }
             _ = runProcess(executable: "/bin/launchctl", arguments: ["bootout", "gui/\(getuid())/com.ai.filesorter"])
             let result = runProcess(executable: "/bin/launchctl", arguments: ["bootstrap", "gui/\(getuid())", plistURL.path])
-            if result.status == 0 {
-                // 旧版本曾把 Agent 复制到这里；新服务加载成功后再清理，避免中断迁移。
-                let oldAgent = configURL.deletingLastPathComponent().appendingPathComponent("AIFileSorterAgent")
-                try? manager.removeItem(at: oldAgent)
-                return ProcessResult(status: 0, output: "原生自动整理已从 App 固定位置启动。")
+            guard result.status == 0 else {
+                if let previousPlistData {
+                    try? previousPlistData.write(to: plistURL, options: .atomic)
+                    if wasLoaded {
+                        _ = runProcess(executable: "/bin/launchctl", arguments: ["bootstrap", "gui/\(getuid())", plistURL.path])
+                    }
+                } else {
+                    try? manager.removeItem(at: plistURL)
+                }
+                let detail = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+                return ProcessResult(
+                    status: result.status,
+                    output: "\(detail.isEmpty ? "没有返回详细错误" : detail)\n已恢复同步前的后台服务配置。"
+                )
             }
-            return result
+            // 旧版本曾把 Agent 复制到这里；新服务加载成功后再清理，避免中断迁移。
+            let oldAgent = configURL.deletingLastPathComponent().appendingPathComponent("AIFileSorterAgent")
+            try? manager.removeItem(at: oldAgent)
+            return ProcessResult(status: 0, output: "原生自动整理已从 App 固定位置启动。")
         } catch {
             return ProcessResult(status: 1, output: error.localizedDescription)
         }
     }
 }
-

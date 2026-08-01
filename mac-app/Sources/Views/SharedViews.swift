@@ -35,13 +35,13 @@ struct StatusCard: View {
                 .font(.system(size: 34))
                 .foregroundStyle(stateColor)
             VStack(alignment: .leading, spacing: 4) {
-                Text(model.runtimeState.title).font(.title3.bold())
-                Text("当前模式：\(OrganizationMode(rawValue: model.config.organizationMode)?.title ?? "需要检查") · \(model.runtimeState.detail)")
+                Text(model.serviceStatus.title).font(.title3.bold())
+                Text("整理方式：\(OrganizationMode(rawValue: model.config.organizationMode)?.title ?? "需要检查") · \(model.serviceStatus.detail)")
                     .foregroundStyle(.secondary)
             }
             Spacer()
             if model.busy { ProgressView().controlSize(.small) }
-            Toggle("", isOn: Binding(
+            Toggle("自动整理", isOn: Binding(
                 get: { model.automationEnabled },
                 set: { enabled in enabled ? model.installAndStart() : model.stopAutomation() }
             ))
@@ -70,4 +70,3 @@ struct EmptyStateView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
-

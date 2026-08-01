@@ -15,7 +15,16 @@ struct SidebarContentView: View {
     @State private var section: SidebarSection? = .pending
     @State private var requestedSection: SidebarSection?
     @State private var showingNavigationConfirmation = false
-    @AppStorage("didShowWelcomeV23") private var didShowWelcome = false
+    @AppStorage("didShowWelcomeV3") private var didShowWelcome = false
+
+    private var inboxFileCount: Int {
+        let path = NSString(string: model.config.watchFolder).expandingTildeInPath
+        let folder = URL(fileURLWithPath: path, isDirectory: true)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: folder.path, isDirectory: &isDirectory), isDirectory.boolValue else { return 0 }
+        let urls = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isRegularFileKey], options: [])) ?? []
+        return urls.count { (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true }
+    }
 
     var body: some View {
         NavigationSplitView {
@@ -35,10 +44,10 @@ struct SidebarContentView: View {
                     Section("整理") {
                         Label {
                             HStack {
-                                Text("待分类")
+                                Text("收件箱")
                                 Spacer()
-                                if !model.pendingFiles.isEmpty {
-                                    Text("\(model.pendingFiles.count)")
+                                if inboxFileCount > 0 {
+                                    Text("\(inboxFileCount)")
                                         .font(.caption.monospacedDigit())
                                         .padding(.horizontal, 7).padding(.vertical, 2)
                                         .background(.quaternary, in: Capsule())
@@ -59,7 +68,7 @@ struct SidebarContentView: View {
                     Circle()
                         .fill(model.automationEnabled ? Color.green : Color.orange)
                         .frame(width: 8, height: 8)
-                    Text(model.runtimeState.title)
+                    Text(model.serviceStatus.title)
                         .font(.caption).foregroundStyle(.secondary)
                     Spacer()
                 }
@@ -68,7 +77,7 @@ struct SidebarContentView: View {
             .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 270)
         } detail: {
             switch section ?? .pending {
-            case .pending: PendingInboxView(model: model)
+            case .pending: InboxView(model: model)
             case .rules: RulesView(model: model)
             case .activity: HistoryView(model: model)
             case .settings: OverviewView(model: model)
@@ -115,4 +124,3 @@ struct SidebarContentView: View {
 }
 
 // 首次引导只解释核心工作流，避免把高级设置一次性塞给新用户。
-

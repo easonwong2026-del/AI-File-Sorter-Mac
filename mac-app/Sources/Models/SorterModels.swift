@@ -25,17 +25,17 @@ enum OrganizationMode: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .manual: return "仅手动整理"
-        case .review: return "自动扫描，整理前确认"
-        case .automatic: return "完全自动整理"
+        case .manual: return "只提供整理建议"
+        case .review: return "整理前让我确认"
+        case .automatic: return "自动整理"
         }
     }
 
     var detail: String {
         switch self {
-        case .manual: return "后台不会自动移动文件，只保留手动扫描和整理。"
-        case .review: return "后台只负责发现符合条件的文件，确认后才会移动。"
-        case .automatic: return "后台会按规则自动整理符合安全条件的文件。"
+        case .manual: return "后台不会自动移动文件，只提供建议和单次整理入口。"
+        case .review: return "后台生成整理建议，移动前需要你确认。"
+        case .automatic: return "符合安全条件的文件会按规则自动整理。"
         }
     }
 }
@@ -58,23 +58,23 @@ enum SorterRuntimeState: String {
 
     var title: String {
         switch self {
-        case .stopped: return "文件整理已停止"
-        case .running: return "文件整理运行中"
-        case .temporarilyPaused: return "文件整理已临时暂停"
-        case .scanning: return "正在扫描文件"
-        case .awaitingConfirmation: return "等待确认整理"
-        case .organizing: return "正在整理文件"
-        case .error: return "整理服务出现问题"
+        case .stopped: return "未启用"
+        case .running: return "正常运行"
+        case .temporarilyPaused: return "已暂停"
+        case .scanning: return "正在扫描"
+        case .awaitingConfirmation: return "等待确认"
+        case .organizing: return "正在整理"
+        case .error: return "Agent 错误"
         }
     }
 
     var detail: String {
         switch self {
-        case .stopped: return "不会自动扫描或移动任何文件。"
-        case .running: return "后台会按当前模式处理文件。"
-        case .temporarilyPaused: return "暂停结束后会恢复之前的整理模式。"
+        case .stopped: return "后台不会自动扫描或移动文件。"
+        case .running: return "后台服务已加载，按当前方式工作。"
+        case .temporarilyPaused: return "后台服务已暂停。"
         case .scanning: return "正在读取文件状态，不会跳过安全检查。"
-        case .awaitingConfirmation: return "文件已经列入待整理列表，等待你的确认。"
+        case .awaitingConfirmation: return "整理建议已生成，等待你的确认。"
         case .organizing: return "正在执行已确认的文件操作。"
         case .error: return "请打开设置中的环境检查或查看技术日志。"
         }
@@ -391,8 +391,8 @@ struct SorterConfig: Codable, Equatable {
             ".dmg", ".pkg",
         ],
         organizationMode: OrganizationMode.review.rawValue,
-        retentionDays: 7,
-        recentModificationProtectionHours: 24,
+        retentionDays: 0,
+        recentModificationProtectionHours: 0,
         automaticScanIntervalHours: 24,
         excludedPaths: [],
         rules: [
@@ -413,7 +413,7 @@ struct ProcessResult {
     let output: String
 }
 
-// 待分类条目只保留界面需要的轻量字段，避免缓存文件内容。
+// 收件箱条目只保留界面需要的轻量字段，避免缓存文件内容。
 struct PendingFile: Identifiable {
     var id: String { path }
     let path: String
@@ -421,6 +421,7 @@ struct PendingFile: Identifiable {
     var keyword: String
     var target: String
     var selected = true
+    var ignored = false
 }
 
 // 单个与批量整理共用同一份草稿，避免“最近目录”“批量移动”“建立规则”各走一套逻辑。
