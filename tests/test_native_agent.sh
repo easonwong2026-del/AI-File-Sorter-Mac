@@ -1,5 +1,5 @@
 #!/bin/bash
-# 原生 2.0 Agent 端到端测试：全部文件位于临时目录，不访问用户真实 Downloads。
+# 原生 Agent 端到端测试：全部文件位于临时目录，不访问用户真实 Downloads。
 
 set -euo pipefail
 
@@ -60,13 +60,25 @@ grep -q '结果=成功' "$ROOT/logs/sorter.log"
 grep -q '结果=未分类' "$ROOT/logs/sorter.log"
 grep -q '手动整理完成' "$ROOT/logs/sorter.log"
 
+# 预先占用整理目标，确认原生 Agent 使用 _1 后缀而不是覆盖已有文件。
+COLLISION_CONFIG="$ROOT/collision-config.json"
+sed "s#\"history_file\": \"$ROOT/logs/history.json\"#\"history_file\": \"$ROOT/logs/collision-history.json\"#" "$CONFIG" > "$COLLISION_CONFIG"
+COLLISION_DEST="$ROOT/Library/Samsung/$(date +%Y-%m-%d)_Samsung_重名.pdf"
+mkdir -p "$(dirname "$COLLISION_DEST")"
+printf 'existing' > "$COLLISION_DEST"
+printf 'incoming' > "$ROOT/Downloads/Samsung_重名.pdf"
+"$AGENT" --config "$COLLISION_CONFIG" --once
+test "$(cat "$COLLISION_DEST")" = "existing"
+test -f "$ROOT/Library/Samsung/$(date +%Y-%m-%d)_Samsung_重名_1.pdf"
+test ! -e "$ROOT/Downloads/Samsung_重名.pdf"
+
 # 验证由 LaunchAgent 使用的事件模式和状态文件。
 printf 'event' > "$ROOT/Downloads/三星_event.pdf"
 "$AGENT" --config "$CONFIG"
 test -f "$ROOT/Library/Samsung/$(date +%Y-%m-%d)_三星_event.pdf"
 test -f "$ROOT/logs/state.json"
 
-# 验证单次批量整理不建立规则、写入历史，并可通过记录 ID 撤销。
+# 验证明确的单次例外：只移动本次选择，不建立规则，写入历史，并可通过记录 ID 撤销。
 printf 'one-time' > "$ROOT/Downloads/Samsung_临时单次文件.pdf"
 "$AGENT" --config "$CONFIG" --move-many "$ROOT/Quick" "$ROOT/Downloads/Samsung_临时单次文件.pdf"
 test -f "$ROOT/Quick/Samsung_临时单次文件.pdf"
@@ -134,10 +146,23 @@ sed -e '/"organization_mode"/d' \
     -e '/"retention_days"/d' \
     -e '/"recent_modification_protection_hours"/d' \
     -e '/"automatic_scan_interval_hours"/d' \
-    -e '/"excluded_paths"/d' "$CONFIG" > "$LEGACY_CONFIG"
+    -e '/"excluded_paths"/d' \
+    -e "s#\"log_file\": \"$ROOT/logs/sorter.log\"#\"log_file\": \"$ROOT/logs/legacy.log\"#" \
+    -e "s#\"state_file\": \"$ROOT/logs/state.json\"#\"state_file\": \"$ROOT/logs/legacy-state.json\"#" "$CONFIG" > "$LEGACY_CONFIG"
 printf 'legacy-review' > "$ROOT/Downloads/Samsung_旧配置审阅.pdf"
 "$AGENT" --config "$LEGACY_CONFIG"
 test -f "$ROOT/Downloads/Samsung_旧配置审阅.pdf"
+grep -q '当前整理模式不允许后台自动移动：review' "$ROOT/logs/legacy.log"
+
+# 手动模式与审阅模式都必须只提供待处理内容，不能被后台事件直接移动。
+MANUAL_CONFIG="$ROOT/manual-config.json"
+sed -e 's/"organization_mode": "automatic"/"organization_mode": "manual"/' \
+    -e "s#\"log_file\": \"$ROOT/logs/sorter.log\"#\"log_file\": \"$ROOT/logs/manual.log\"#" \
+    -e "s#\"state_file\": \"$ROOT/logs/state.json\"#\"state_file\": \"$ROOT/logs/manual-state.json\"#" "$CONFIG" > "$MANUAL_CONFIG"
+printf 'manual-mode' > "$ROOT/Downloads/Samsung_手动模式.pdf"
+"$AGENT" --config "$MANUAL_CONFIG"
+test -f "$ROOT/Downloads/Samsung_手动模式.pdf"
+grep -q '当前整理模式不允许后台自动移动：manual' "$ROOT/logs/manual.log"
 
 # 排除路径在后台自动模式下也必须保留原位。
 EXCLUDED_CONFIG="$ROOT/excluded-config.json"
@@ -146,6 +171,44 @@ printf 'excluded' > "$ROOT/Downloads/Samsung_排除.pdf"
 "$AGENT" --config "$EXCLUDED_CONFIG"
 test -f "$ROOT/Downloads/Samsung_排除.pdf"
 
+# 保留时间使用旧创建日期的合成文件验证；最近修改保护使用当前创建文件验证。
+if ! command -v SetFile >/dev/null 2>&1; then
+    echo "错误：macOS 原生测试需要 SetFile 来设置合成文件的创建日期"
+    exit 1
+fi
+PROTECTION_ROOT="$ROOT/protection"
+mkdir -p "$PROTECTION_ROOT/Downloads"
+RETENTION_CONFIG="$PROTECTION_ROOT/retention-config.json"
+sed -e "s#$ROOT/Downloads#$PROTECTION_ROOT/Downloads#g" \
+    -e "s#$ROOT/Library#$PROTECTION_ROOT/Library#g" \
+    -e "s#$ROOT/logs#$PROTECTION_ROOT/logs#g" \
+    -e 's/"retention_days": 0/"retention_days": 1/' \
+    "$CONFIG" > "$RETENTION_CONFIG"
+printf 'old-enough' > "$PROTECTION_ROOT/Downloads/Samsung_保留期后移动.pdf"
+touch -t 202001010000 "$PROTECTION_ROOT/Downloads/Samsung_保留期后移动.pdf"
+SetFile -d '01/01/2020 00:00:00' "$PROTECTION_ROOT/Downloads/Samsung_保留期后移动.pdf"
+"$AGENT" --config "$RETENTION_CONFIG"
+test -f "$PROTECTION_ROOT/Library/Samsung/$(date +%Y-%m-%d)_Samsung_保留期后移动.pdf"
+printf 'new-retention' > "$PROTECTION_ROOT/Downloads/Samsung_once_保留期.pdf"
+"$AGENT" --config "$RETENTION_CONFIG" --once
+test -f "$PROTECTION_ROOT/Downloads/Samsung_once_保留期.pdf"
+"$AGENT" --config "$RETENTION_CONFIG" --move-once "$PROTECTION_ROOT/Downloads/Samsung_once_保留期.pdf" "$PROTECTION_ROOT/Quick"
+test -f "$PROTECTION_ROOT/Quick/Samsung_once_保留期.pdf"
+
+RECENT_CONFIG="$PROTECTION_ROOT/recent-config.json"
+sed -e 's/"retention_days": 1/"retention_days": 0/' \
+    -e 's/"recent_modification_protection_hours": 0/"recent_modification_protection_hours": 24/' \
+    -e "s#$PROTECTION_ROOT/logs/state.json#$PROTECTION_ROOT/logs/recent-state.json#g" \
+    -e "s#$PROTECTION_ROOT/logs/sorter.log#$PROTECTION_ROOT/logs/recent.log#g" \
+    -e "s#$PROTECTION_ROOT/logs/history.json#$PROTECTION_ROOT/logs/recent-history.json#g" \
+    "$RETENTION_CONFIG" > "$RECENT_CONFIG"
+printf 'still-changing' > "$PROTECTION_ROOT/Downloads/Samsung_最近修改保护.pdf"
+"$AGENT" --config "$RECENT_CONFIG" --once
+test -f "$PROTECTION_ROOT/Downloads/Samsung_最近修改保护.pdf"
+test ! -e "$PROTECTION_ROOT/Library/Samsung/$(date +%Y-%m-%d)_Samsung_最近修改保护.pdf"
+"$AGENT" --config "$RECENT_CONFIG" --move-once "$PROTECTION_ROOT/Downloads/Samsung_最近修改保护.pdf" "$PROTECTION_ROOT/Quick"
+test -f "$PROTECTION_ROOT/Quick/Samsung_最近修改保护.pdf"
+
 # 目标路径位于监听目录内时，必须在配置加载阶段拒绝，避免出现整理循环。
 LOOP_CONFIG="$ROOT/loop-config.json"
 sed "s#\"target\": \"$ROOT/Library/Samsung\"#\"target\": \"$ROOT/Downloads/分类结果\"#" "$CONFIG" > "$LOOP_CONFIG"
@@ -153,5 +216,24 @@ if "$AGENT" --config "$LOOP_CONFIG" --check-config; then
     echo "错误：监听目录内部目标不应通过配置检查"
     exit 1
 fi
+
+# 符号链接不能把监听目录外的真实文件伪装成可整理来源。
+OUTSIDE_FILE="$ROOT/outside.pdf"
+printf 'outside' > "$OUTSIDE_FILE"
+ln -s "$OUTSIDE_FILE" "$ROOT/Downloads/Samsung_监听外部链接.pdf"
+if "$AGENT" --config "$CONFIG" --move-once "$ROOT/Downloads/Samsung_监听外部链接.pdf" "$ROOT/Quick"; then
+    echo "错误：指向监听目录外的符号链接不应被移动"
+    exit 1
+fi
+test -f "$OUTSIDE_FILE"
+test -L "$ROOT/Downloads/Samsung_监听外部链接.pdf"
+
+# 临时下载后缀即使被明确选择也不能移动。
+printf 'partial' > "$ROOT/Downloads/Samsung_未完成.part"
+if "$AGENT" --config "$CONFIG" --move-once "$ROOT/Downloads/Samsung_未完成.part" "$ROOT/Quick"; then
+    echo "错误：临时下载文件不应被移动"
+    exit 1
+fi
+test -f "$ROOT/Downloads/Samsung_未完成.part"
 
 echo "原生 Agent 端到端测试通过。"
