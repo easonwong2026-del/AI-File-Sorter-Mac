@@ -18,8 +18,29 @@ if ! command -v swiftc >/dev/null 2>&1; then
     exit 1
 fi
 
-# 某些 macOS 同时保留多个 SDK；选择最早的完整 SDK，可兼容 macOS 13+，并避开预览版 SDK 小版本不一致。
-SDK_PATH="$(find "$(xcode-select -p)/SDKs" -maxdepth 1 -type d -name 'MacOSX*.sdk' | sort | head -1)"
+# 某些 macOS 同时保留多个 SDK；兼容 CommandLineTools、Xcode 以及 GitHub-hosted runner 的目录布局。
+SDK_PATH=""
+if XCODE_ROOT="$(xcode-select -p 2>/dev/null)"; then
+    for SDK_ROOT in \
+        "$XCODE_ROOT/SDKs" \
+        "$XCODE_ROOT/Platforms/MacOSX.platform/Developer/SDKs" \
+        "$XCODE_ROOT/Toolchains/XcodeDefault.xctoolchain/SDKs"; do
+        if [ -d "$SDK_ROOT" ]; then
+            SDK_PATH="$(find "$SDK_ROOT" -maxdepth 1 -type d -name 'MacOSX*.sdk' | sort | head -1)"
+            [ -n "$SDK_PATH" ] && break
+        fi
+    done
+fi
+if [ -z "$SDK_PATH" ]; then
+    SDK_PATH="$(find /Applications -path '*/Platforms/MacOSX.platform/Developer/SDKs/MacOSX*.sdk' -type d 2>/dev/null | sort | head -1)"
+fi
+if [ -z "$SDK_PATH" ] && command -v xcrun >/dev/null 2>&1; then
+    SDK_PATH="$(xcrun --sdk macosx --show-sdk-path 2>/dev/null || true)"
+fi
+if [ -z "$SDK_PATH" ] || [ ! -d "$SDK_PATH" ]; then
+    echo "找不到 macOS SDK，请确认已安装 Xcode Command Line Tools 或 Xcode。"
+    exit 1
+fi
 MODULE_CACHE="$BUILD_DIR/module-cache"
 mkdir -p "$MODULE_CACHE"
 export CLANG_MODULE_CACHE_PATH="$MODULE_CACHE"
