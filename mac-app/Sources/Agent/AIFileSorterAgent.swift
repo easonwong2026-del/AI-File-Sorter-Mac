@@ -1724,7 +1724,10 @@ final class NativeSorter {
                 state.rulesFingerprint = fingerprint
             }
             let existing = Set(initialFiles.map { canonicalFileURL($0).path })
-            state.files = state.files.filter { existing.contains($0.key) }
+            // Keep undo markers even when this directory snapshot predates the
+            // restore. The next automatic pass must see the marker and wait
+            // for a signature change instead of immediately moving the file again.
+            state.files = state.files.filter { existing.contains($0.key) || $0.value.reason == "undo" }
             try writeAtomically(try encodedState(state), to: stateURL)
             return (state, false)
         }
