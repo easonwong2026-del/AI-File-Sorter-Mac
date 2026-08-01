@@ -154,6 +154,7 @@ MANUAL_PID=$!
 wait "$AUTO_PID"; AUTO_STATUS=$?
 wait "$MANUAL_PID"; MANUAL_STATUS=$?
 set -e
+echo "v3 RC stability: automatic/manual exit codes automatic=$AUTO_STATUS manual=$MANUAL_STATUS"
 test "$AUTO_STATUS" -eq 0
 test "$(find "$AUTO_ROOT/Target" -type f -name 'Race_auto*.pdf' | wc -l | tr -d ' ')" -eq 1
 test -n "$(plutil -extract 0.id raw "$AUTO_ROOT/logs/history.json")"
@@ -173,6 +174,7 @@ UNDO_PID=$!
 wait "$UNDO_AUTO_PID"; UNDO_AUTO_STATUS=$?
 wait "$UNDO_PID"; UNDO_STATUS=$?
 set -e
+echo "v3 RC stability: undo/automatic exit codes automatic=$UNDO_AUTO_STATUS undo=$UNDO_STATUS"
 test "$UNDO_AUTO_STATUS" -eq 0
 test "$UNDO_STATUS" -eq 0
 test -f "$UNDO_ROOT/Downloads/Race_undo.pdf"
