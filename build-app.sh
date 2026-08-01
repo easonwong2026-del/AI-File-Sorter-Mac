@@ -50,7 +50,9 @@ export SWIFT_MODULE_CACHE_PATH="$MODULE_CACHE"
 APP_SOURCES=(
     "$PROJECT_DIR/mac-app/Sources/App/AIFileSorterApplication.swift"
     "$PROJECT_DIR/mac-app/Sources/App/WelcomeAndMain.swift"
+    "$PROJECT_DIR/mac-app/Sources/Core/FileAssessmentTypes.swift"
     "$PROJECT_DIR/mac-app/Sources/Models/SorterModels.swift"
+    "$PROJECT_DIR/mac-app/Sources/Services/LaunchAgentManager.swift"
     "$PROJECT_DIR/mac-app/Sources/Services/AppModel.swift"
     "$PROJECT_DIR/mac-app/Sources/Views/SharedViews.swift"
     "$PROJECT_DIR/mac-app/Sources/Views/OverviewView.swift"
@@ -67,6 +69,7 @@ for ARCH in arm64 x86_64; do
         "${APP_SOURCES[@]}" -o "$BUILD_DIR/AIFileSorter-$ARCH"
     swiftc -swift-version 5 -Osize -sdk "$SDK_PATH" -target "$ARCH-apple-macosx13.0" \
         -framework CryptoKit \
+        "$PROJECT_DIR/mac-app/Sources/Core/FileAssessmentTypes.swift" \
         "$PROJECT_DIR/mac-app/Sources/Agent/AIFileSorterAgent.swift" -o "$BUILD_DIR/AIFileSorterAgent-$ARCH"
 done
 lipo -create "$BUILD_DIR/AIFileSorter-arm64" "$BUILD_DIR/AIFileSorter-x86_64" -output "$BUILD_DIR/AIFileSorter"
