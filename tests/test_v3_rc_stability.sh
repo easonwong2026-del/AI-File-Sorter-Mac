@@ -11,7 +11,23 @@ ROOT="$(mktemp -d "/tmp/ai-file-sorter-v3-stability-test.XXXXXX")"
 cleanup() {
     if [ "${KEEP_TEST_ROOT:-0}" = "1" ]; then echo "保留测试目录：$ROOT"; else rm -rf "$ROOT"; fi
 }
-trap cleanup EXIT
+on_exit() {
+    local status=$?
+    if [ "$status" -ne 0 ]; then
+        echo "v3 RC stability test failed with status $status; root=$ROOT"
+        find "$ROOT" -maxdepth 4 -type f -print
+        for output in "$ROOT"/*/*.out "$ROOT"/*/*/*.out; do
+            if [ -f "$output" ]; then
+                echo "--- $output"
+                sed -n '1,120p' "$output"
+            fi
+        done
+    fi
+    cleanup
+    trap - EXIT
+    exit "$status"
+}
+trap on_exit EXIT
 
 test -x "$AGENT"
 
@@ -49,6 +65,7 @@ JSON
 
 SCAN_CONFIG="$(make_config scan)"
 SCAN_ROOT="$ROOT/scan"
+echo "v3 RC stability: scan-json"
 printf 'scan-secret-content' > "$SCAN_ROOT/Downloads/Race_scan.pdf"
 printf 'unfinished' > "$SCAN_ROOT/Downloads/Race_download.part"
 printf 'hidden' > "$SCAN_ROOT/Downloads/.hidden.pdf"
@@ -65,6 +82,7 @@ grep -q '"can_select":false' "$SCAN_ROOT/scan.json"
 
 DIFFERENT_CONFIG="$(make_config different)"
 DIFFERENT_ROOT="$ROOT/different"
+echo "v3 RC stability: concurrent different files"
 printf 'a' > "$DIFFERENT_ROOT/Downloads/Race_a.pdf"
 printf 'b' > "$DIFFERENT_ROOT/Downloads/Race_b.pdf"
 set +e
@@ -84,6 +102,7 @@ test "$(grep -o '"id"' "$DIFFERENT_ROOT/logs/history.json" | wc -l | tr -d ' ')"
 
 CORRUPT_CONFIG="$(make_config corrupt)"
 CORRUPT_ROOT="$ROOT/corrupt"
+echo "v3 RC stability: corrupt persistence"
 printf 'history-corrupt' > "$CORRUPT_ROOT/Downloads/Race_history_corrupt.pdf"
 printf '{not-valid-history' > "$CORRUPT_ROOT/logs/history.json"
 cp "$CORRUPT_ROOT/logs/history.json" "$CORRUPT_ROOT/history.before"
@@ -107,6 +126,7 @@ cmp -s "$CORRUPT_ROOT/state.before" "$CORRUPT_ROOT/logs/state.json"
 
 SAME_CONFIG="$(make_config same)"
 SAME_ROOT="$ROOT/same"
+echo "v3 RC stability: same-file competition"
 printf 'same-file' > "$SAME_ROOT/Downloads/Race_same.pdf"
 set +e
 "$AGENT" --config "$SAME_CONFIG" --move-once "$SAME_ROOT/Downloads/Race_same.pdf" "$SAME_ROOT/Target" > "$SAME_ROOT/first.out" 2>&1 &
@@ -124,6 +144,7 @@ grep -q '不存在\|未执行\|已不存在' "$SAME_ROOT/first.out" "$SAME_ROOT/
 
 AUTO_CONFIG="$(make_config automatic-manual)"
 AUTO_ROOT="$ROOT/automatic-manual"
+echo "v3 RC stability: automatic/manual competition"
 printf 'automatic-manual' > "$AUTO_ROOT/Downloads/Race_auto.pdf"
 set +e
 "$AGENT" --config "$AUTO_CONFIG" --run > "$AUTO_ROOT/automatic.out" 2>&1 &
@@ -140,6 +161,7 @@ test "$(grep -o '"id"' "$AUTO_ROOT/logs/history.json" | wc -l | tr -d ' ')" -eq 
 
 UNDO_CONFIG="$(make_config undo)"
 UNDO_ROOT="$ROOT/undo"
+echo "v3 RC stability: undo/automatic competition"
 printf 'undo-race' > "$UNDO_ROOT/Downloads/Race_undo.pdf"
 "$AGENT" --config "$UNDO_CONFIG" --move-once "$UNDO_ROOT/Downloads/Race_undo.pdf" "$UNDO_ROOT/Target" > "$UNDO_ROOT/move.out" 2>&1
 UNDO_ID="$(plutil -extract 0.id raw "$UNDO_ROOT/logs/history.json")"
