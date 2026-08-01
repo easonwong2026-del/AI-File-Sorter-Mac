@@ -22,3 +22,9 @@ jobs:
 
       - name: Run native Agent tests
         run: ./tests/test_native_agent.sh
+
+      - name: Run v3 RC stability tests
+        run: ./tests/test_v3_rc_stability.sh
+
+      - name: Run LaunchAgent lifecycle tests
+        run: ./tests/test_launch_agent_lifecycle.sh
