@@ -26,13 +26,27 @@ export CLANG_MODULE_CACHE_PATH="$MODULE_CACHE"
 export SWIFT_MODULE_CACHE_PATH="$MODULE_CACHE"
 
 # 分别构建 Apple Silicon 与 Intel，再合并为一个通用应用。
+APP_SOURCES=(
+    "$PROJECT_DIR/mac-app/Sources/App/AIFileSorterApplication.swift"
+    "$PROJECT_DIR/mac-app/Sources/App/WelcomeAndMain.swift"
+    "$PROJECT_DIR/mac-app/Sources/Models/SorterModels.swift"
+    "$PROJECT_DIR/mac-app/Sources/Services/AppModel.swift"
+    "$PROJECT_DIR/mac-app/Sources/Views/SharedViews.swift"
+    "$PROJECT_DIR/mac-app/Sources/Views/OverviewView.swift"
+    "$PROJECT_DIR/mac-app/Sources/Views/InboxView.swift"
+    "$PROJECT_DIR/mac-app/Sources/Views/OrganizingPlanView.swift"
+    "$PROJECT_DIR/mac-app/Sources/Views/RulesView.swift"
+    "$PROJECT_DIR/mac-app/Sources/Views/HistoryView.swift"
+    "$PROJECT_DIR/mac-app/Sources/Views/SidebarView.swift"
+)
+
 for ARCH in arm64 x86_64; do
     swiftc -swift-version 5 -Osize -parse-as-library -sdk "$SDK_PATH" -target "$ARCH-apple-macosx13.0" \
         -framework SwiftUI -framework AppKit -framework QuickLookUI \
-        "$PROJECT_DIR/mac-app/Sources/AIFileSorterApp.swift" -o "$BUILD_DIR/AIFileSorter-$ARCH"
+        "${APP_SOURCES[@]}" -o "$BUILD_DIR/AIFileSorter-$ARCH"
     swiftc -swift-version 5 -Osize -sdk "$SDK_PATH" -target "$ARCH-apple-macosx13.0" \
         -framework CryptoKit \
-        "$PROJECT_DIR/mac-app/Sources/AIFileSorterAgent.swift" -o "$BUILD_DIR/AIFileSorterAgent-$ARCH"
+        "$PROJECT_DIR/mac-app/Sources/Agent/AIFileSorterAgent.swift" -o "$BUILD_DIR/AIFileSorterAgent-$ARCH"
 done
 lipo -create "$BUILD_DIR/AIFileSorter-arm64" "$BUILD_DIR/AIFileSorter-x86_64" -output "$BUILD_DIR/AIFileSorter"
 lipo -create "$BUILD_DIR/AIFileSorterAgent-arm64" "$BUILD_DIR/AIFileSorterAgent-x86_64" -output "$BUILD_DIR/AIFileSorterAgent"
