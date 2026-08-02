@@ -33,11 +33,40 @@ enum OrganizationMode: String, CaseIterable, Identifiable {
 
     var detail: String {
         switch self {
-        case .manual: return "后台不会自动移动文件，只提供建议和单次整理入口。"
-        case .review: return "后台生成整理建议，移动前需要你确认。"
-        case .automatic: return "符合安全条件的文件会按规则自动整理。"
+        case .manual: return "后台服务启用时只提供整理建议和单次整理入口，不会自动移动文件。"
+        case .review: return "后台服务启用时生成整理建议，移动前需要你确认。"
+        case .automatic: return "后台服务启用时，符合安全条件的文件会按规则自动整理。"
         }
     }
+}
+
+/// 用于把 v9 及更早配置中的“是否启用后台服务”从 LaunchAgent 运行状态迁移出来。
+///
+/// `serviceProbeSucceeded == false` 时仍然安全返回关闭，调用方可以在下一次安全保存时
+/// 写入明确的 `automation_enabled: false`，而不会因为探测失败而启用服务。
+public struct LegacyAutomationStateObservation: Equatable {
+    public let plistExists: Bool
+    public let serviceLoaded: Bool
+    public let serviceProbeSucceeded: Bool
+
+    public init(plistExists: Bool, serviceLoaded: Bool, serviceProbeSucceeded: Bool) {
+        self.plistExists = plistExists
+        self.serviceLoaded = serviceLoaded
+        self.serviceProbeSucceeded = serviceProbeSucceeded
+    }
+
+    public var inferredAutomationEnabled: Bool {
+        plistExists || serviceLoaded
+    }
+
+    public var usedSafeDefault: Bool {
+        !inferredAutomationEnabled && !serviceProbeSucceeded
+    }
+}
+
+enum AutomationStateMigrationResult: Equatable {
+    case notRequired
+    case migrated(enabled: Bool, usedSafeDefault: Bool)
 }
 
 enum SorterRuntimeState: String {
@@ -49,6 +78,8 @@ enum SorterRuntimeState: String {
     case organizing
     case error
 
+    /// 兼容旧调用方的“活动中”提示；不代表持久化后台服务开关。
+    /// 服务开关必须读取 `SorterConfig.automationEnabled`，整理模式也不能由此状态反推。
     var isServiceEnabled: Bool {
         switch self {
         case .running, .scanning, .awaitingConfirmation, .organizing: return true
@@ -262,6 +293,8 @@ struct RuleValidationIssue: Identifiable {
 }
 
 struct SorterConfig: Codable, Equatable {
+    static let currentConfigVersion = 10
+
     var configVersion: Int
     var note: String?
     var watchFolder: String
@@ -277,11 +310,16 @@ struct SorterConfig: Codable, Equatable {
     var rename: RenameOptions
     var supportedExtensions: [String]
     var organizationMode: String
+    var automationEnabled: Bool
     var retentionDays: Int
     var recentModificationProtectionHours: Int
     var automaticScanIntervalHours: Int
     var excludedPaths: [String]
     var rules: [SorterRule]
+
+    /// 该标记不写入 JSON，仅表示解码时没有发现 `automation_enabled`。
+    /// AppModel 应在读取 LaunchAgent 状态后调用 `migrateAutomationEnabled(using:)`。
+    var automationStateNeedsMigration: Bool
 
     enum CodingKeys: String, CodingKey {
         case configVersion = "_config_version"
@@ -299,6 +337,7 @@ struct SorterConfig: Codable, Equatable {
         case rename
         case supportedExtensions = "supported_extensions"
         case organizationMode = "organization_mode"
+        case automationEnabled = "automation_enabled"
         case retentionDays = "retention_days"
         case recentModificationProtectionHours = "recent_modification_protection_hours"
         case automaticScanIntervalHours = "automatic_scan_interval_hours"
@@ -312,7 +351,8 @@ struct SorterConfig: Codable, Equatable {
         maxEventRuntimeSeconds: Double, processExistingOnFirstStart: Bool, moveMethod: String,
         rename: RenameOptions, supportedExtensions: [String], organizationMode: String,
         retentionDays: Int, recentModificationProtectionHours: Int, automaticScanIntervalHours: Int,
-        excludedPaths: [String], rules: [SorterRule]
+        excludedPaths: [String], rules: [SorterRule], automationEnabled: Bool = false,
+        automationStateNeedsMigration: Bool = false
     ) {
         self.configVersion = configVersion
         self.note = note
@@ -329,11 +369,13 @@ struct SorterConfig: Codable, Equatable {
         self.rename = rename
         self.supportedExtensions = supportedExtensions
         self.organizationMode = organizationMode
+        self.automationEnabled = automationEnabled
         self.retentionDays = retentionDays
         self.recentModificationProtectionHours = recentModificationProtectionHours
         self.automaticScanIntervalHours = automaticScanIntervalHours
         self.excludedPaths = excludedPaths
         self.rules = rules
+        self.automationStateNeedsMigration = automationStateNeedsMigration
     }
 
     init(from decoder: Decoder) throws {
@@ -359,7 +401,11 @@ struct SorterConfig: Codable, Equatable {
             for item in [".csv", ".tsv"] where !supportedExtensions.contains(item) { supportedExtensions.append(item) }
         }
         let storedMode = try c.decodeIfPresent(String.self, forKey: .organizationMode) ?? d.organizationMode
-        organizationMode = OrganizationMode(rawValue: storedMode)?.rawValue ?? (storedVersion < 9 ? OrganizationMode.review.rawValue : d.organizationMode)
+        // 迁移后台服务状态时只看 LaunchAgent，不根据整理模式猜测，避免悄然改变用户选择。
+        organizationMode = OrganizationMode(rawValue: storedMode)?.rawValue ?? d.organizationMode
+        let storedAutomationEnabled = try c.decodeIfPresent(Bool.self, forKey: .automationEnabled)
+        automationEnabled = storedAutomationEnabled ?? false
+        automationStateNeedsMigration = storedAutomationEnabled == nil
         retentionDays = max(0, try c.decodeIfPresent(Int.self, forKey: .retentionDays) ?? d.retentionDays)
         recentModificationProtectionHours = max(0, try c.decodeIfPresent(Int.self, forKey: .recentModificationProtectionHours) ?? d.recentModificationProtectionHours)
         automaticScanIntervalHours = max(0, try c.decodeIfPresent(Int.self, forKey: .automaticScanIntervalHours) ?? d.automaticScanIntervalHours)
@@ -367,11 +413,28 @@ struct SorterConfig: Codable, Equatable {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
         rules = try c.decodeIfPresent([SorterRule].self, forKey: .rules) ?? d.rules
-        configVersion = 9
+        configVersion = Self.currentConfigVersion
+    }
+
+    /// 将旧配置的服务开关绑定到 LaunchAgent 的持久状态。
+    ///
+    /// `plistExists || serviceLoaded` 为真时迁移为开启；没有 plist 且探测成功时迁移为关闭；
+    /// 探测不可用时同样安全迁移为关闭。调用方随后应在安全保存路径写出 v10。
+    @discardableResult
+    mutating func migrateAutomationEnabled(
+        using observation: LegacyAutomationStateObservation
+    ) -> AutomationStateMigrationResult {
+        guard automationStateNeedsMigration else { return .notRequired }
+        automationEnabled = observation.inferredAutomationEnabled
+        automationStateNeedsMigration = false
+        return .migrated(
+            enabled: automationEnabled,
+            usedSafeDefault: observation.usedSafeDefault
+        )
     }
 
     static let fallback = SorterConfig(
-        configVersion: 9,
+        configVersion: currentConfigVersion,
         note: "内置默认配置；所有预置规则均可在图形界面修改或删除。",
         watchFolder: "~/Downloads",
         logFile: "logs/sorter.log",
@@ -404,7 +467,8 @@ struct SorterConfig: Codable, Equatable {
             SorterRule(name: "压缩文件", keywords: [], extensions: ["zip", "rar", "7z", "tar", "gz"], target: "~/Documents/下载整理/压缩文件"),
             SorterRule(name: "安装包", keywords: [], extensions: ["dmg", "pkg"], target: "~/Documents/下载整理/安装包"),
             SorterRule(name: "办公文档", keywords: [], extensions: ["pdf", "doc", "docx", "xls", "xlsx", "csv", "tsv", "ppt", "pptx"], target: "~/Documents/下载整理/办公文档"),
-        ]
+        ],
+        automationEnabled: false
     )
 }
 
@@ -413,15 +477,104 @@ struct ProcessResult {
     let output: String
 }
 
-// 收件箱条目只保留界面需要的轻量字段，避免缓存文件内容。
+/// Agent assessment permissions are deliberately separate from the user's
+/// transient selection state.  The Agent owns the safety decision; the App
+/// only consumes these three answers for the corresponding UI affordances.
+///
+/// `FileAssessmentItem` owns these answers. The App only routes each answer
+/// to the corresponding UI affordance and never re-evaluates file safety.
+struct AssessmentActionPermissions: Equatable {
+    let canManualMove: Bool
+    let canIncludeInPlan: Bool
+    let canAutoMoveNow: Bool
+
+    init(canManualMove: Bool, canIncludeInPlan: Bool, canAutoMoveNow: Bool) {
+        self.canManualMove = canManualMove
+        self.canIncludeInPlan = canIncludeInPlan
+        self.canAutoMoveNow = canAutoMoveNow
+    }
+
+    /// Compatibility mapping for old in-memory callers. New scan results
+    /// always pass explicit v2 fields through AppModel.
+    static func legacy(for assessment: FileAssessmentItem) -> Self {
+        return Self(
+            canManualMove: assessment.canManualMove,
+            canIncludeInPlan: assessment.canIncludeInPlan,
+            canAutoMoveNow: assessment.canAutoMoveNow
+        )
+    }
+}
+
+// 收件箱条目只保留 Agent 评估结果和界面选择状态，避免 App 重新判断文件资格。
 struct PendingFile: Identifiable {
-    var id: String { path }
-    let path: String
-    let fileName: String
+    let assessment: FileAssessmentItem
+    /// Permissions belong to the current assessment and must be replaced on
+    /// every successful scan.  They are intentionally not user-editable.
+    let permissions: AssessmentActionPermissions
     var keyword: String
-    var target: String
     var selected = true
     var ignored = false
+
+    init(
+        assessment: FileAssessmentItem,
+        keyword: String,
+        selected: Bool? = nil,
+        ignored: Bool = false,
+        permissions: AssessmentActionPermissions? = nil
+    ) {
+        let resolvedPermissions = permissions ?? AssessmentActionPermissions(
+            canManualMove: assessment.canManualMove,
+            canIncludeInPlan: assessment.canIncludeInPlan,
+            canAutoMoveNow: assessment.canAutoMoveNow
+        )
+        self.assessment = assessment
+        self.permissions = resolvedPermissions
+        self.keyword = keyword
+        self.ignored = ignored
+        let requestedSelection = selected ?? resolvedPermissions.canManualMove
+        // A stale user selection must never survive a scan that removes the
+        // manual-move permission (for example locked/hidden/temporary files).
+        self.selected = requestedSelection && resolvedPermissions.canManualMove && !ignored
+    }
+
+    /// Rebuild one row from a successful scan while preserving only the
+    /// interaction state that belongs to the user.  All assessment-derived
+    /// fields, including permissions, are taken from `assessment`.
+    static func rebuilding(
+        assessment: FileAssessmentItem,
+        previous: PendingFile?,
+        suggestedKeyword: String,
+        ignored: Bool? = nil,
+        permissions: AssessmentActionPermissions? = nil
+    ) -> PendingFile {
+        PendingFile(
+            assessment: assessment,
+            keyword: previous?.keyword ?? suggestedKeyword,
+            selected: previous?.selected,
+            ignored: ignored ?? previous?.ignored ?? false,
+            permissions: permissions
+        )
+    }
+
+    var id: String { assessment.path }
+    var path: String { assessment.path }
+    var fileName: String { assessment.fileName }
+    var target: String { assessment.targetFolder }
+    var extensionName: String { assessment.extension }
+    var fileSize: UInt64 { assessment.fileSize }
+    var modifiedAt: Date? { AssessmentTimestamp.date(from: assessment.modifiedAt) }
+    var status: FileProcessingStatus { assessment.status }
+
+    /// Effective UI permissions.  `ignored` is a user interaction state and
+    /// therefore only gates manual/plan affordances; it must not rewrite the
+    /// Agent's `canAutoMoveNow` answer.
+    var canManualMove: Bool { permissions.canManualMove && !ignored }
+    var canIncludeInPlan: Bool { permissions.canIncludeInPlan && !ignored }
+    var canAutoMoveNow: Bool { permissions.canAutoMoveNow }
+
+    /// Source compatibility for callers not yet migrated to the explicit
+    /// manual-move name.  New UI code should use `canManualMove`.
+    var canSelect: Bool { canManualMove }
 }
 
 // 单个与批量整理共用同一份草稿，避免“最近目录”“批量移动”“建立规则”各走一套逻辑。
@@ -431,14 +584,6 @@ struct PendingMoveDraft: Identifiable {
     let fileNames: [String]
     let suggestedKeyword: String
     let suggestedTarget: String
-}
-
-enum FileEligibility: Equatable {
-    case eligible
-    case excluded
-    case tooYoung
-    case recentlyModified
-    case locked
 }
 
 struct MoveHistory: Identifiable, Codable {
@@ -459,13 +604,88 @@ struct MoveHistory: Identifiable, Codable {
 // 整理计划只缓存路径与短文本，不读取文件内容，关闭窗口后即可释放。
 struct OrganizingPlanItem: Identifiable {
     let id: String
+    let assessment: FileAssessmentItem
     let sourcePath: String
     let fileName: String
     let ruleName: String
     let destinationPath: String
     let status: String
     let fileSize: UInt64
-    let modifiedAt: Date
-    let ageDays: Int
+    let modifiedAt: Date?
+    let ageDays: Int?
+    let canManualMove: Bool
+    let canIncludeInPlan: Bool
+    let canAutoMoveNow: Bool
     var selected: Bool
+
+    init(
+        id: String,
+        assessment: FileAssessmentItem,
+        sourcePath: String,
+        fileName: String,
+        ruleName: String,
+        destinationPath: String,
+        status: String,
+        fileSize: UInt64,
+        modifiedAt: Date?,
+        ageDays: Int?,
+        canManualMove: Bool,
+        canIncludeInPlan: Bool,
+        canAutoMoveNow: Bool,
+        selected: Bool
+    ) {
+        self.id = id
+        self.assessment = assessment
+        self.sourcePath = sourcePath
+        self.fileName = fileName
+        self.ruleName = ruleName
+        self.destinationPath = destinationPath
+        self.status = status
+        self.fileSize = fileSize
+        self.modifiedAt = modifiedAt
+        self.ageDays = ageDays
+        self.canManualMove = canManualMove
+        self.canIncludeInPlan = canIncludeInPlan
+        self.canAutoMoveNow = canAutoMoveNow
+        self.selected = selected && canIncludeInPlan
+    }
+
+    /// Source-compatible initializer for AppModel before its plan builder is
+    /// migrated to pass the three explicit permissions.  The stored result is
+    /// still split, and `canSelect` is interpreted as the plan flag here.
+    init(
+        id: String,
+        assessment: FileAssessmentItem,
+        sourcePath: String,
+        fileName: String,
+        ruleName: String,
+        destinationPath: String,
+        status: String,
+        fileSize: UInt64,
+        modifiedAt: Date?,
+        ageDays: Int?,
+        canSelect: Bool,
+        selected: Bool
+    ) {
+        self.init(
+            id: id,
+            assessment: assessment,
+            sourcePath: sourcePath,
+            fileName: fileName,
+            ruleName: ruleName,
+            destinationPath: destinationPath,
+            status: status,
+            fileSize: fileSize,
+            modifiedAt: modifiedAt,
+            ageDays: ageDays,
+            canManualMove: assessment.canManualMove,
+            canIncludeInPlan: canSelect && assessment.canIncludeInPlan,
+            canAutoMoveNow: assessment.canAutoMoveNow,
+            selected: selected
+        )
+    }
+
+    /// Compatibility for callers that still use the ambiguous name.  It now
+    /// means plan inclusion only; inbox code must use `canManualMove`.
+    var canSelect: Bool { canIncludeInPlan }
 }

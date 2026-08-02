@@ -7,7 +7,7 @@ PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 OUTPUT_DIR="$PROJECT_DIR/artifacts"
 APP_PATH="$OUTPUT_DIR/AI File Sorter.app"
 VERSION="$(plutil -extract CFBundleShortVersionString raw "$PROJECT_DIR/mac-app/Info.plist")"
-ZIP_PATH="$OUTPUT_DIR/AI-File-Sorter-Mac-App-v$VERSION.zip"
+ZIP_PATH="$OUTPUT_DIR/AI-File-Sorter-Mac-Apple-Silicon-v$VERSION.zip"
 BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ai-file-sorter-build.XXXXXX")"
 trap 'rm -rf "$BUILD_DIR"' EXIT
 
@@ -15,6 +15,11 @@ mkdir -p "$OUTPUT_DIR"
 
 if ! command -v swiftc >/dev/null 2>&1; then
     echo "找不到 Swift 编译器，请先运行 xcode-select --install。"
+    exit 1
+fi
+
+if [ "$(uname -m)" != "arm64" ]; then
+    echo "仅支持在 Apple Silicon arm64 主机上构建此版本。"
     exit 1
 fi
 
@@ -46,11 +51,14 @@ mkdir -p "$MODULE_CACHE"
 export CLANG_MODULE_CACHE_PATH="$MODULE_CACHE"
 export SWIFT_MODULE_CACHE_PATH="$MODULE_CACHE"
 
-# 分别构建 Apple Silicon 与 Intel，再合并为一个通用应用。
+# 只构建 Apple Silicon arm64；不生成 Intel 或 Universal 中间产物。
 APP_SOURCES=(
     "$PROJECT_DIR/mac-app/Sources/App/AIFileSorterApplication.swift"
     "$PROJECT_DIR/mac-app/Sources/App/WelcomeAndMain.swift"
+    "$PROJECT_DIR/mac-app/Sources/Core/FileAssessmentTypes.swift"
+    "$PROJECT_DIR/mac-app/Sources/Core/AssessmentTimestamp.swift"
     "$PROJECT_DIR/mac-app/Sources/Models/SorterModels.swift"
+    "$PROJECT_DIR/mac-app/Sources/Services/LaunchAgentManager.swift"
     "$PROJECT_DIR/mac-app/Sources/Services/AppModel.swift"
     "$PROJECT_DIR/mac-app/Sources/Views/SharedViews.swift"
     "$PROJECT_DIR/mac-app/Sources/Views/OverviewView.swift"
@@ -61,19 +69,16 @@ APP_SOURCES=(
     "$PROJECT_DIR/mac-app/Sources/Views/SidebarView.swift"
 )
 
-for ARCH in arm64 x86_64; do
-    swiftc -swift-version 5 -Osize -parse-as-library -sdk "$SDK_PATH" -target "$ARCH-apple-macosx13.0" \
-        -framework SwiftUI -framework AppKit -framework QuickLookUI \
-        "${APP_SOURCES[@]}" -o "$BUILD_DIR/AIFileSorter-$ARCH"
-    swiftc -swift-version 5 -Osize -sdk "$SDK_PATH" -target "$ARCH-apple-macosx13.0" \
-        -framework CryptoKit \
-        "$PROJECT_DIR/mac-app/Sources/Agent/AIFileSorterAgent.swift" -o "$BUILD_DIR/AIFileSorterAgent-$ARCH"
-done
-lipo -create "$BUILD_DIR/AIFileSorter-arm64" "$BUILD_DIR/AIFileSorter-x86_64" -output "$BUILD_DIR/AIFileSorter"
-lipo -create "$BUILD_DIR/AIFileSorterAgent-arm64" "$BUILD_DIR/AIFileSorterAgent-x86_64" -output "$BUILD_DIR/AIFileSorterAgent"
+swiftc -swift-version 5 -Osize -parse-as-library -sdk "$SDK_PATH" -target "arm64-apple-macosx13.0" \
+    -framework SwiftUI -framework AppKit -framework QuickLookUI \
+    "${APP_SOURCES[@]}" -o "$BUILD_DIR/AIFileSorter"
+swiftc -swift-version 5 -Osize -sdk "$SDK_PATH" -target "arm64-apple-macosx13.0" \
+    -framework CryptoKit \
+    "$PROJECT_DIR/mac-app/Sources/Core/FileAssessmentTypes.swift" \
+    "$PROJECT_DIR/mac-app/Sources/Core/AssessmentTimestamp.swift" \
+    "$PROJECT_DIR/mac-app/Sources/Agent/AIFileSorterAgent.swift" -o "$BUILD_DIR/AIFileSorterAgent"
 
-HOST_ARCH="$(uname -m)"
-swiftc -swift-version 5 -sdk "$SDK_PATH" -target "$HOST_ARCH-apple-macosx13.0" \
+swiftc -swift-version 5 -sdk "$SDK_PATH" -target "arm64-apple-macosx13.0" \
     -framework AppKit "$PROJECT_DIR/mac-app/Tools/IconMaker.swift" -o "$BUILD_DIR/IconMaker"
 "$BUILD_DIR/IconMaker" "$BUILD_DIR/AppIcon.iconset"
 

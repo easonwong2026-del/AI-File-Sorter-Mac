@@ -50,20 +50,32 @@ private enum InboxRowKind: Equatable {
     case skipped
 }
 
+private extension FileProcessingStatus {
+    var rowKind: InboxRowKind {
+        switch self {
+        case .ready, .awaitingConfirmation, .automaticPending: return .actionable
+        case .waitingRetention, .recentlyModified, .unstable: return .waiting
+        case .unmatched: return .unmatched
+        default: return .skipped
+        }
+    }
+}
+
 private struct InboxItem: Identifiable {
     let id: String
+    let assessment: FileAssessmentItem
     let path: String
     let fileName: String
     let extensionName: String
     let fileSize: UInt64
-    let modifiedAt: Date
+    let modifiedAt: Date?
     let kind: InboxRowKind
     let statusTitle: String
     let reason: String
     let remaining: TimeInterval?
     let target: String
     let keyword: String
-    let isPending: Bool
+    let canManualMove: Bool
 }
 
 struct InboxView: View {
@@ -77,7 +89,7 @@ struct InboxView: View {
     @State private var watchFolderError: String?
     @State private var showingPlan = false
 
-    private var selectedCount: Int { model.pendingFiles.count(where: \.selected) }
+    private var selectedCount: Int { model.pendingFiles.count { $0.selected && $0.canManualMove } }
 
     private var extensions: [String] {
         ["全部", "无扩展名"] + inboxItems.map(\.extensionName).filter { !$0.isEmpty }.sorted().reduce(into: [String]()) {
@@ -109,7 +121,14 @@ struct InboxView: View {
             case .name:
                 return lhs.fileName.localizedCaseInsensitiveCompare(rhs.fileName) == .orderedAscending
             case .modified:
-                if lhs.modifiedAt != rhs.modifiedAt { return lhs.modifiedAt > rhs.modifiedAt }
+                if lhs.modifiedAt != rhs.modifiedAt {
+                    switch (lhs.modifiedAt, rhs.modifiedAt) {
+                    case let (left?, right?): return left > right
+                    case (nil, _?): return false
+                    case (_?, nil): return true
+                    default: break
+                    }
+                }
             case .size:
                 if lhs.fileSize != rhs.fileSize { return lhs.fileSize > rhs.fileSize }
             case .status:
@@ -221,7 +240,33 @@ struct InboxView: View {
                 .padding(.horizontal, 12).padding(.bottom, 9)
         }
         .onAppear { refreshInbox() }
-        .onChange(of: model.pendingFiles.map { "\($0.path)|\($0.ignored)" }) { _ in refreshInbox() }
+        .onChange(of: model.pendingFiles.map {
+            [
+                $0.path,
+                $0.keyword,
+                String($0.selected),
+                String($0.ignored),
+                $0.assessment.fileName,
+                $0.assessment.extension,
+                String($0.assessment.fileSize),
+                $0.assessment.modifiedAt,
+                $0.assessment.status.rawValue,
+                $0.assessment.reason,
+                String($0.assessment.remainingSeconds),
+                $0.assessment.ruleName,
+                $0.assessment.targetFolder,
+                $0.assessment.destinationPath,
+                String($0.canManualMove),
+                String($0.canIncludeInPlan),
+                String($0.canAutoMoveNow),
+            ].joined(separator: "|")
+        }) { _ in refreshInbox() }
+        // A successful scan replaces the complete assessment snapshot.  This
+        // keeps the local row projection in sync even when only target,
+        // remaining time, size, or modified time changed.  A failed scan
+        // preserves the previous rows but still updates the visible error.
+        .onChange(of: model.inboxSnapshot?.generatedAt) { _ in refreshInbox() }
+        .onChange(of: model.scanError) { _ in refreshInbox() }
         .onChange(of: model.config) { _ in refreshInbox() }
         .sheet(item: $model.pendingMoveDraft) { draft in
             PendingMoveSheet(model: model, draft: draft)
@@ -268,7 +313,7 @@ struct InboxView: View {
             Toggle("", isOn: selectionBinding(for: item))
                 .labelsHidden()
                 .toggleStyle(.checkbox)
-                .disabled(!item.isPending)
+                .disabled(!item.canManualMove)
             Image(systemName: statusIcon(for: item.kind))
                 .foregroundStyle(statusColor(for: item.kind))
                 .frame(width: 18)
@@ -285,7 +330,7 @@ struct InboxView: View {
                     Text(remainingText(remaining))
                         .font(.caption2).foregroundStyle(.secondary).monospacedDigit()
                 } else {
-                    Text(item.modifiedAt.formatted(date: .abbreviated, time: .shortened))
+                    Text(item.modifiedAt?.formatted(date: .abbreviated, time: .shortened) ?? "未知")
                         .font(.caption2).foregroundStyle(.secondary)
                 }
             }
@@ -312,7 +357,7 @@ struct InboxView: View {
                         Spacer(minLength: 12)
                         Toggle("加入批量操作", isOn: selectionBinding(for: item))
                             .toggleStyle(.checkbox)
-                            .disabled(!item.isPending)
+                            .disabled(!item.canManualMove)
                     }
 
                     VStack(alignment: .leading, spacing: 10) {
@@ -336,7 +381,7 @@ struct InboxView: View {
                         Text("文件信息").font(.headline)
                         Text("扩展名：\(item.extensionName.isEmpty ? "无" : ".\(item.extensionName)")")
                         Text("大小：\(fileSizeText(item.fileSize))")
-                        Text("最近修改：\(item.modifiedAt.formatted(date: .abbreviated, time: .shortened))")
+                        Text("最近修改：\(item.modifiedAt?.formatted(date: .abbreviated, time: .shortened) ?? "未知")")
                     }
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -346,12 +391,12 @@ struct InboxView: View {
                         Button("快速预览") { model.quickLookPending(pendingFile(for: item)) }
                             .keyboardShortcut(.space, modifiers: [])
                         Button("在 Finder 显示") { model.revealPending(pendingFile(for: item)) }
-                        if item.isPending {
+                        if item.canManualMove {
                             Button("整理一次…") { model.beginPendingMove(paths: [item.path]) }
                                 .buttonStyle(.borderedProminent)
                         }
                     }
-                    if !item.isPending {
+                    if !item.canManualMove {
                         Text("当前文件保留在收件箱中用于说明状态；执行按钮只对现有可执行列表启用。")
                             .font(.caption).foregroundStyle(.secondary)
                     }
@@ -365,164 +410,50 @@ struct InboxView: View {
     }
 
     private func refreshInbox() {
-        let expanded = NSString(string: model.config.watchFolder).expandingTildeInPath
-        let folder = URL(fileURLWithPath: expanded, isDirectory: true)
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: folder.path, isDirectory: &isDirectory), isDirectory.boolValue else {
-            inboxItems = []
-            watchFolderError = expanded.isEmpty ? "监听文件夹为空" : "目录不存在：\(expanded)"
-            selectedPath = nil
-            return
+        inboxItems = model.pendingFiles.map { pending in
+            let assessment = pending.assessment
+            let ignored = pending.ignored
+            return InboxItem(
+                id: assessment.path,
+                assessment: assessment,
+                path: assessment.path,
+                fileName: assessment.fileName,
+                extensionName: assessment.extension,
+                fileSize: assessment.fileSize,
+                modifiedAt: pending.modifiedAt,
+                kind: ignored ? .skipped : assessment.status.rowKind,
+                statusTitle: ignored ? "已忽略" : model.assessmentStatusTitle(assessment.status),
+                reason: ignored ? "你已选择暂不处理；文件仍保留在收件箱" : assessment.reason,
+                remaining: assessment.remainingSeconds > 0 ? assessment.remainingSeconds : nil,
+                target: assessment.targetFolder,
+                keyword: pending.keyword,
+                canManualMove: pending.canManualMove
+            )
         }
-
-        do {
-            let keys: Set<URLResourceKey> = [
-                .isRegularFileKey, .isUserImmutableKey, .fileSizeKey,
-                .creationDateKey, .contentModificationDateKey
-            ]
-            let urls = try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: Array(keys), options: [])
-            let now = Date()
-            inboxItems = urls.compactMap { makeInboxItem(url: $0, now: now) }
-            watchFolderError = nil
-            if let selectedPath, !inboxItems.contains(where: { $0.path == selectedPath }) {
-                self.selectedPath = inboxItems.first?.path
-            } else if self.selectedPath == nil {
-                self.selectedPath = inboxItems.first?.path
-            }
-        } catch {
-            inboxItems = []
-            watchFolderError = error.localizedDescription
-            selectedPath = nil
+        watchFolderError = model.inboxSnapshot == nil ? model.scanError : nil
+        if let selectedPath, !inboxItems.contains(where: { $0.path == selectedPath }) {
+            self.selectedPath = inboxItems.first?.path
+        } else if self.selectedPath == nil {
+            self.selectedPath = inboxItems.first?.path
         }
-    }
-
-    private func makeInboxItem(url: URL, now: Date) -> InboxItem? {
-        let keys: Set<URLResourceKey> = [
-            .isRegularFileKey, .isUserImmutableKey, .fileSizeKey,
-            .creationDateKey, .contentModificationDateKey
-        ]
-        guard let values = try? url.resourceValues(forKeys: keys), values.isRegularFile == true else { return nil }
-
-        let fileName = url.lastPathComponent
-        let extensionName = url.pathExtension.lowercased()
-        let fileSize = UInt64(values.fileSize ?? 0)
-        let modifiedAt = values.contentModificationDate ?? values.creationDate ?? now
-        let pendingFile = model.pendingFiles.first { $0.path == url.path }
-        let pending = pendingFile != nil && !(pendingFile?.ignored ?? false)
-        let ignored = pendingFile?.ignored ?? false
-        let defaults = InboxItem(
-            id: url.path, path: url.path, fileName: fileName, extensionName: extensionName,
-            fileSize: fileSize, modifiedAt: modifiedAt, kind: .skipped,
-            statusTitle: "已跳过", reason: "暂时无法判断文件状态", remaining: nil,
-            target: "", keyword: "", isPending: pending
-        )
-
-        if ignored {
-            return with(item: defaults, statusTitle: "已忽略", reason: "你已选择暂不处理；文件仍保留在收件箱", kind: .skipped)
-        }
-        if fileName.hasPrefix(".") {
-            return with(item: defaults, statusTitle: "已跳过", reason: "隐藏文件不会被处理")
-        }
-        let temporarySuffixes = [".crdownload", ".download", ".part", ".partial", ".tmp"]
-        if temporarySuffixes.contains(where: { fileName.lowercased().hasSuffix($0) }) {
-            return with(item: defaults, statusTitle: "等待中", reason: "下载或写入尚未完成", kind: .waiting)
-        }
-        if model.config.excludedPaths.contains(where: { pathMatches(url, configuredPath: $0) }) {
-            return with(item: defaults, statusTitle: "已排除", reason: "命中设置中的排除路径")
-        }
-        if values.isUserImmutable == true {
-            return with(item: defaults, statusTitle: "已锁定", reason: "文件被系统标记为不可修改")
-        }
-
-        let supported = Set(model.config.supportedExtensions.map { $0.lowercased().hasPrefix(".") ? $0.lowercased() : ".\($0.lowercased())" })
-        if !supported.contains(".\(extensionName)") {
-            return with(item: defaults, statusTitle: "不支持", reason: "扩展名不在受支持类型中")
-        }
-
-        if model.config.retentionDays > 0 {
-            let ageReference = [values.creationDate, values.contentModificationDate].compactMap { $0 }.max() ?? modifiedAt
-            let deadline = ageReference.addingTimeInterval(Double(model.config.retentionDays) * 86_400)
-            if deadline > now {
-                return with(item: defaults, statusTitle: "等待中", reason: "文件保留期尚未结束", remaining: deadline.timeIntervalSince(now), kind: .waiting)
-            }
-        }
-        if model.config.recentModificationProtectionHours > 0 {
-            let deadline = modifiedAt.addingTimeInterval(Double(model.config.recentModificationProtectionHours) * 3_600)
-            if deadline > now {
-                return with(item: defaults, statusTitle: "等待中", reason: "最近仍有修改，先等待文件稳定", remaining: deadline.timeIntervalSince(now), kind: .waiting)
-            }
-        }
-
-        guard let rule = model.config.rules.first(where: { $0.matches(fileURL: url) }) else {
-            return with(item: defaults, statusTitle: "未匹配", reason: "没有规则命中；可手动整理或编辑规则", kind: .unmatched)
-        }
-        guard !rule.target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return with(item: defaults, statusTitle: "暂不处理", reason: "匹配规则没有目标文件夹", kind: .skipped)
-        }
-        let watchURL = URL(fileURLWithPath: NSString(string: model.config.watchFolder).expandingTildeInPath)
-            .resolvingSymlinksInPath().standardizedFileURL
-        let targetURL = URL(fileURLWithPath: NSString(string: rule.target).expandingTildeInPath)
-            .resolvingSymlinksInPath().standardizedFileURL
-        let watchPrefix = watchURL.path.hasSuffix("/") ? watchURL.path : watchURL.path + "/"
-        if targetURL == watchURL || targetURL.path.hasPrefix(watchPrefix) {
-            return with(item: defaults, statusTitle: "暂不处理", reason: "规则目标位于监听目录内，可能形成整理循环", target: rule.target, kind: .skipped)
-        }
-        var writableProbe = targetURL
-        while !FileManager.default.fileExists(atPath: writableProbe.path), writableProbe.path != "/" {
-            writableProbe.deleteLastPathComponent()
-        }
-        if !FileManager.default.isWritableFile(atPath: writableProbe.path) {
-            return with(item: defaults, statusTitle: "暂不处理", reason: "规则目标目录不可写", target: rule.target, kind: .skipped)
-        }
-        let keyword = rule.keywords.first(where: { fileName.range(of: $0, options: [.caseInsensitive, .diacriticInsensitive]) != nil }) ?? ""
-        let mode = OrganizationMode(rawValue: model.config.organizationMode) ?? .review
-        switch mode {
-        case .manual:
-            return with(item: defaults, statusTitle: "可手动整理", reason: "命中“\(rule.name)”；当前方式不会自动移动", target: rule.target, keyword: keyword, kind: .actionable)
-        case .review:
-            return with(item: defaults, statusTitle: "等待确认", reason: "命中“\(rule.name)”；确认后才会移动", target: rule.target, keyword: keyword, kind: .actionable)
-        case .automatic:
-            return with(item: defaults, statusTitle: "自动整理", reason: "命中“\(rule.name)”；后台会按规则处理", target: rule.target, keyword: keyword, kind: .actionable)
-        }
-    }
-
-    private func with(
-        item: InboxItem,
-        statusTitle: String,
-        reason: String,
-        remaining: TimeInterval? = nil,
-        target: String = "",
-        keyword: String = "",
-        kind: InboxRowKind? = nil
-    ) -> InboxItem {
-        InboxItem(
-            id: item.id, path: item.path, fileName: item.fileName, extensionName: item.extensionName,
-            fileSize: item.fileSize, modifiedAt: item.modifiedAt, kind: kind ?? item.kind,
-            statusTitle: statusTitle, reason: reason, remaining: remaining,
-            target: target, keyword: keyword, isPending: item.isPending
-        )
-    }
-
-    private func pathMatches(_ file: URL, configuredPath: String) -> Bool {
-        let expanded = NSString(string: configuredPath).expandingTildeInPath
-        let configured = URL(fileURLWithPath: expanded).standardizedFileURL.path
-        let candidate = file.standardizedFileURL.path
-        let prefix = configured == "/" ? "/" : (configured.hasSuffix("/") ? configured : configured + "/")
-        return candidate == configured || candidate.hasPrefix(prefix)
     }
 
     private func selectionBinding(for item: InboxItem) -> Binding<Bool> {
         Binding(
-            get: { model.pendingFiles.first(where: { $0.path == item.path })?.selected ?? false },
+            get: {
+                guard let pending = model.pendingFiles.first(where: { $0.path == item.path }) else { return false }
+                return pending.selected && pending.canManualMove
+            },
             set: { value in
                 guard let index = model.pendingFiles.firstIndex(where: { $0.path == item.path }) else { return }
-                model.pendingFiles[index].selected = value
+                model.pendingFiles[index].selected = value && model.pendingFiles[index].canManualMove
             }
         )
     }
 
     private func pendingFile(for item: InboxItem) -> PendingFile {
-        PendingFile(path: item.path, fileName: item.fileName, keyword: item.keyword, target: item.target, selected: item.isPending)
+        model.pendingFiles.first(where: { $0.path == item.path })
+            ?? PendingFile(assessment: item.assessment, keyword: item.keyword, selected: item.canManualMove)
     }
 
     private func nonEmptyPath(_ value: String) -> String? {

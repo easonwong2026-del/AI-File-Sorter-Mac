@@ -1,5 +1,5 @@
 {
-  "_config_version": 9,
+  "_config_version": 10,
   "_说明": "JSON 不支持注释，因此使用本字段保存中文说明；修改规则后 LaunchAgent 会自动重新检查未分类文件。",
   "watch_folder": "~/Downloads",
   "log_file": "logs/sorter.log",
@@ -48,6 +48,7 @@
     ".pkg"
   ],
   "organization_mode": "review",
+  "automation_enabled": false,
   "retention_days": 0,
   "recent_modification_protection_hours": 0,
   "automatic_scan_interval_hours": 24,
