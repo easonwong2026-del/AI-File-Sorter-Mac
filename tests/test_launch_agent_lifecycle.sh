@@ -261,6 +261,7 @@ LIFECYCLE_ROOT="$ROOT" swiftc -swift-version 5 -sdk "$SDK_PATH" \
     -target "$ARCH-apple-macosx13.0" \
     -framework SwiftUI -framework AppKit -framework QuickLookUI \
     "$PROJECT_DIR/mac-app/Sources/Core/FileAssessmentTypes.swift" \
+    "$PROJECT_DIR/mac-app/Sources/Core/AssessmentTimestamp.swift" \
     "$PROJECT_DIR/mac-app/Sources/Models/SorterModels.swift" \
     "$PROJECT_DIR/mac-app/Sources/Services/LaunchAgentManager.swift" \
     "$HARNESS" -o "$EXECUTABLE"

@@ -3,7 +3,7 @@
 [![Apache-2.0 License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![macOS 13+](https://img.shields.io/badge/macOS-13%2B-black.svg)](#系统要求)
 
-一个本地优先的 macOS 文件整理 App。当前版本是 v3 RC（`3.0.0-rc.1`），使用 SwiftUI 图形界面、Swift 原生整理 Agent 和 macOS `launchd` 目录事件，不需要 Python、Docker、后台服务器或持续运行的终端进程。
+一个本地优先的 macOS 文件整理 App。当前版本是 v3 RC（`3.0.0-rc.2`，build `20`），仅支持 Apple Silicon（M 系列芯片），不支持 Intel Mac。使用 SwiftUI 图形界面、Swift 原生整理 Agent 和 macOS `launchd` 目录事件，不需要 Python、Docker、后台服务器或持续运行的终端进程。
 
 ## 隐私与联网边界
 
@@ -17,7 +17,7 @@ App 默认完全在本机运行：不会上传文件内容、文件名、目录�
 
 ### 安装已构建版本
 
-1. 解压 `AI-File-Sorter-Mac-App-v<版本号>.zip`。
+1. 解压 `AI-File-Sorter-Mac-Apple-Silicon-v3.0.0-rc.2.zip`。
 2. 将 `AI File Sorter.app` 拖入 `/Applications`（“应用程序”）。固定位置用于保持后台服务的路径和权限稳定。
 3. 打开 App，按首次引导检查通用规则，并在“设置”中选择监听目录。
 4. 在设置页的状态卡打开“后台服务”。不需要手动编辑后台服务，也不需要管理员密码。
@@ -40,13 +40,13 @@ App 使用固定标识 `com.ai.filesorter.agent`。配置、状态、历史和�
 
 ### 从源码构建
 
-要求 macOS 13 或更新版本，以及 Xcode Command Line Tools：
+要求 Apple Silicon Mac、macOS 13 或更新版本，以及 Xcode Command Line Tools：
 
 ```bash
 ./build-app.sh
 ```
 
-构建产物位于 `artifacts/`：`AI File Sorter.app` 和对应版本的 zip 压缩包。也可以用下面的脚本将构建产物安装到 `/Applications`：
+构建脚本只生成 arm64 Mach-O，不生成 Intel 或 Universal 版本。构建产物位于 `artifacts/`：`AI File Sorter.app` 和 `AI-File-Sorter-Mac-Apple-Silicon-v3.0.0-rc.2.zip`。也可以用下面的脚本将构建产物安装到 `/Applications`：
 
 ```bash
 ./install-app.sh
@@ -110,6 +110,7 @@ App 保存规则前会检查空匹配条件、无效正则、大小范围、负�
 ## 系统要求
 
 - macOS 13 或更新版本；
+- Apple Silicon（M1/M2/M3/M4/M5 及后续 M 系列）；不支持 Intel Mac；
 - 当前用户可以访问监听目录和规则目标目录；
 - 从源码构建时需要 Xcode Command Line Tools。
 
@@ -119,12 +120,14 @@ App 保存规则前会检查空匹配条件、无效正则、大小范围、负�
 
 ```bash
 ./build-app.sh
+./tests/test_apple_silicon_bundle.sh
+./tests/test_rc2_regressions.sh
 ./tests/test_native_agent.sh
 ./tests/test_v3_rc_stability.sh
 ./tests/test_launch_agent_lifecycle.sh
 ```
 
-测试覆盖后台服务开关迁移与生命周期、批量 JSON 评估、旧状态迁移、首次启动保留、保留时间、最近修改保护、排除路径、`--once`、单次整理不建规则、重名保护、整理模式、批次撤销、撤销防重复整理、跨进程 mutation lock、互斥执行和防环路配置检查。
+测试覆盖 arm64 bundle 审计、后台服务开关迁移与生命周期、删除失败回滚、schema v2/整数时间戳、快照刷新、手动/计划权限拆分、旧状态迁移、首次启动保留、保留时间、最近修改保护、排除路径、`--once`、单次整理不建规则、重名保护、整理模式、批次撤销、撤销防重复整理、跨进程 mutation lock、互斥执行和防环路配置检查。
 
 ## 项目结构
 
