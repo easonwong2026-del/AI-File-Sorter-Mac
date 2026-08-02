@@ -115,8 +115,10 @@ final class AppModel: ObservableObject {
         do {
             try deployEngine()
             try loadConfig()
+            migrateLegacyAgentIfNeeded()
             captureSavedConfig()
             cleanupDisabledAutomationIfNeeded()
+            cleanupLegacyAgentIfSafe()
             refreshStatus()
             refreshPendingFiles()
             startPendingWatcher()
@@ -167,11 +169,38 @@ final class AppModel: ObservableObject {
             let observation = launchAgentManager.inspect().legacyAutomationStateObservation
             let migration = config.migrateAutomationEnabled(using: observation)
             if case let .migrated(enabled, usedSafeDefault) = migration {
+                if let data = encodedConfig() {
+                    try? data.write(to: configURL, options: .atomic)
+                }
                 message = usedSafeDefault
                     ? "旧配置未能确认后台服务状态，已安全迁移为关闭"
                     : (enabled ? "已根据现有后台服务迁移为启用" : "已将旧配置迁移为后台服务关闭")
             }
         }
+    }
+
+    private func migrateLegacyAgentIfNeeded() {
+        guard config.automationEnabled else { return }
+        let configuration = makeLaunchAgentConfiguration()
+        let inspection = launchAgentManager.inspect(configuration: configuration)
+        guard inspection.plistExists, inspection.argumentsMatch != true else { return }
+        do {
+            _ = try launchAgentManager.enable(configuration)
+            message = "已将旧后台组件迁移到当前 App 内的 Apple Silicon Agent"
+        } catch {
+            lastAgentError = error.localizedDescription
+            setServiceStatus(.agentError, detail: "旧后台组件迁移失败：\(error.localizedDescription)")
+            message = "旧后台组件迁移失败：\(error.localizedDescription)"
+        }
+    }
+
+    private func cleanupLegacyAgentIfSafe() {
+        let legacy = engineDirectory.appendingPathComponent("AIFileSorterAgent")
+        guard FileManager.default.fileExists(atPath: legacy.path) else { return }
+        let inspection = launchAgentManager.inspect()
+        let arguments = inspection.plist["ProgramArguments"] as? [String] ?? []
+        guard !arguments.contains(legacy.path) else { return }
+        try? FileManager.default.removeItem(at: legacy)
     }
 
     private func encodedConfig() -> Data? {
@@ -428,19 +457,30 @@ final class AppModel: ObservableObject {
     func stopAutomation() {
         let previousConfigData = savedConfigData
         let previousConfig = config
+        let launchAgentConfiguration = makeLaunchAgentConfiguration(for: previousConfig)
         setServiceStatus(.stopping)
         runBackground(title: "正在停止后台服务…", operation: { [launchAgentManager] in
-            do {
-                _ = try launchAgentManager.disable()
+            let result = launchAgentManager.disableTransaction(configuration: launchAgentConfiguration)
+            switch result.outcome {
+            case .closedSuccessfully:
                 return ProcessResult(status: 0, output: "LaunchAgent 已停止并移除")
-            } catch {
-                return ProcessResult(status: 1, output: error.localizedDescription)
+            case .failedButRestored:
+                return ProcessResult(status: 2, output: "关闭失败，但原状态已恢复：\(result.error?.localizedDescription ?? "未知错误")")
+            case .failedAndRestoreFailed:
+                return ProcessResult(status: 3, output: "关闭失败且恢复失败：\(result.error?.localizedDescription ?? "未知错误")")
             }
         }, completion: { [weak self] result in
             guard let self else { return }
             guard result.status == 0 else {
                 self.config = previousConfig
-                self.message = "停止失败，后台服务仍保持原状态：\(Self.cleanProcessOutput(result.output))"
+                if result.status >= 3 {
+                    self.setServiceStatus(.agentError, detail: Self.cleanProcessOutput(result.output))
+                } else {
+                    self.refreshStatus()
+                }
+                self.message = result.status >= 3
+                    ? "停止失败且状态未能确认：\(Self.cleanProcessOutput(result.output))"
+                    : "停止失败，后台服务已恢复原状态：\(Self.cleanProcessOutput(result.output))"
                 return
             }
             self.config.automationEnabled = false
@@ -752,7 +792,7 @@ final class AppModel: ObservableObject {
             } else {
                 do {
                     let document = try JSONDecoder().decode(FileAssessmentDocument.self, from: Data(result.output.utf8))
-                    guard document.schemaVersion == 1 else {
+                    guard document.schemaVersion == 2 else {
                         throw NSError(
                             domain: "AIFileSorter",
                             code: 41,
@@ -787,18 +827,18 @@ final class AppModel: ObservableObject {
         let ignored = Set(UserDefaults.standard.stringArray(forKey: ignoredDefaultsKey) ?? [])
         let existing = Dictionary(uniqueKeysWithValues: pendingFiles.map { ($0.path, $0) })
         pendingFiles = document.items.prefix(300).map { item in
-            let isIgnored = ignored.contains(fileSignatureKey(for: item))
-            if var preserved = existing[item.path], preserved.assessment.path == item.path {
-                preserved.ignored = isIgnored
-                if isIgnored { preserved.selected = false }
-                return preserved
-            }
-            let keyword = suggestedKeyword(for: URL(fileURLWithPath: item.path))
-            return PendingFile(
+            let isIgnored = fileSignatureKey(for: item).map(ignored.contains) == true
+            let permissions = AssessmentActionPermissions(
+                canManualMove: item.canManualMove,
+                canIncludeInPlan: item.canIncludeInPlan,
+                canAutoMoveNow: item.canAutoMoveNow
+            )
+            return PendingFile.rebuilding(
                 assessment: item,
-                keyword: keyword,
-                selected: item.canSelect && !isIgnored,
-                ignored: isIgnored
+                previous: existing[item.path],
+                suggestedKeyword: suggestedKeyword(for: URL(fileURLWithPath: item.path)),
+                ignored: isIgnored,
+                permissions: permissions
             )
         }
     }
@@ -807,17 +847,16 @@ final class AppModel: ObservableObject {
         config.rules.enumerated().first { _, rule in rule.matches(fileName: fileName) }
     }
 
-    private func fileSignatureKey(_ file: URL) -> String {
-        let values = try? file.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
-        let size = values?.fileSize ?? 0
-        let modified = Int64((values?.contentModificationDate ?? .distantPast).timeIntervalSince1970 * 1_000_000_000)
+    private func fileSignatureKey(_ file: URL) -> String? {
+        let values = try? file.resourceValues(forKeys: [.fileSizeKey])
+        guard let size = values?.fileSize,
+              let modified = AssessmentTimestamp.modifiedNanoseconds(at: file) else { return nil }
         return "\(file.path)|\(size)|\(modified)"
     }
 
-    private func fileSignatureKey(for item: FileAssessmentItem) -> String {
-        let modified = ISO8601DateFormatter().date(from: item.modifiedAt) ?? .distantPast
-        let nanos = Int64(modified.timeIntervalSince1970 * 1_000_000_000)
-        return "\(item.path)|\(item.fileSize)|\(nanos)"
+    private func fileSignatureKey(for item: FileAssessmentItem) -> String? {
+        guard let modified = item.modifiedNs else { return nil }
+        return "\(item.path)|\(item.fileSize)|\(modified)"
     }
 
     // 去掉日期、版本号和常见下载噪声，优先保留最能代表文件内容的名称片段。
@@ -1230,12 +1269,11 @@ final class AppModel: ObservableObject {
     }
 
     private func generatePlanFromSnapshot() {
-        let formatter = ISO8601DateFormatter()
         organizingPlan = pendingFiles.prefix(300).compactMap { pending in
             let assessment = pending.assessment
-            guard assessment.canSelect, !pending.ignored, !assessment.ruleName.isEmpty else { return nil }
-            let modifiedAt = formatter.date(from: assessment.modifiedAt) ?? Date()
-            let ageDays = max(0, Int(Date().timeIntervalSince(modifiedAt) / 86_400))
+            guard pending.canIncludeInPlan, !pending.ignored, !assessment.ruleName.isEmpty else { return nil }
+            let modifiedAt = AssessmentTimestamp.date(from: assessment.modifiedAt)
+            let ageDays = modifiedAt.map { max(0, Int(Date().timeIntervalSince($0) / 86_400)) }
             let status = assessmentStatusTitle(assessment.status)
             return OrganizingPlanItem(
                 id: assessment.path,
@@ -1248,8 +1286,10 @@ final class AppModel: ObservableObject {
                 fileSize: assessment.fileSize,
                 modifiedAt: modifiedAt,
                 ageDays: ageDays,
-                canSelect: assessment.canSelect,
-                selected: assessment.canSelect && assessment.canMoveNow
+                canManualMove: assessment.canManualMove,
+                canIncludeInPlan: assessment.canIncludeInPlan,
+                canAutoMoveNow: assessment.canAutoMoveNow,
+                selected: assessment.canIncludeInPlan && assessment.canAutoMoveNow
             )
         }
         message = organizingPlan.isEmpty ? "当前没有会被规则整理的文件" : "已生成 \(organizingPlan.count) 项整理计划"

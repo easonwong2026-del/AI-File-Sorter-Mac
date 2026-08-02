@@ -38,14 +38,19 @@ struct FileAssessmentItem: Codable {
     let `extension`: String
     let fileSize: UInt64
     let modifiedAt: String
+    let modifiedNs: Int64?
     let status: FileProcessingStatus
     let reason: String
     let remainingSeconds: Double
     let ruleName: String
     let targetFolder: String
     let destinationPath: String
-    let canSelect: Bool
-    let canMoveNow: Bool
+    let canManualMove: Bool
+    let canIncludeInPlan: Bool
+    let canAutoMoveNow: Bool
+
+    /// Compatibility alias for source callers; it is not emitted in schema v2.
+    var canSelect: Bool { canManualMove }
 
     enum CodingKeys: String, CodingKey {
         case path
@@ -53,13 +58,16 @@ struct FileAssessmentItem: Codable {
         case `extension`
         case fileSize = "file_size"
         case modifiedAt = "modified_at"
+        case modifiedNs = "modified_ns"
         case status, reason
         case remainingSeconds = "remaining_seconds"
         case ruleName = "rule_name"
         case targetFolder = "target_folder"
         case destinationPath = "destination_path"
-        case canSelect = "can_select"
-        case canMoveNow = "can_move_now"
+        case canManualMove = "can_manual_move"
+        case canIncludeInPlan = "can_include_in_plan"
+        case canAutoMoveNow = "can_auto_move_now"
+        case legacyCanSelect = "can_select"
     }
 
     init(
@@ -68,28 +76,71 @@ struct FileAssessmentItem: Codable {
         fileExtension: String,
         fileSize: UInt64,
         modifiedAt: String,
+        modifiedNs: Int64?,
         status: FileProcessingStatus,
         reason: String,
         remainingSeconds: Double,
         ruleName: String,
         targetFolder: String,
         destinationPath: String,
-        canSelect: Bool,
-        canMoveNow: Bool
+        canManualMove: Bool,
+        canIncludeInPlan: Bool,
+        canAutoMoveNow: Bool
     ) {
         self.path = path
         self.fileName = fileName
         self.extension = fileExtension
         self.fileSize = fileSize
         self.modifiedAt = modifiedAt
+        self.modifiedNs = modifiedNs
         self.status = status
         self.reason = reason
         self.remainingSeconds = max(0, remainingSeconds)
         self.ruleName = ruleName
         self.targetFolder = targetFolder
         self.destinationPath = destinationPath
-        self.canSelect = canSelect
-        self.canMoveNow = canMoveNow
+        self.canManualMove = canManualMove
+        self.canIncludeInPlan = canIncludeInPlan
+        self.canAutoMoveNow = canAutoMoveNow
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        fileSize = try container.decode(UInt64.self, forKey: .fileSize)
+        modifiedNs = try container.decodeIfPresent(Int64.self, forKey: .modifiedNs)
+        path = try container.decode(String.self, forKey: .path)
+        fileName = try container.decode(String.self, forKey: .fileName)
+        `extension` = try container.decode(String.self, forKey: .extension)
+        modifiedAt = try container.decode(String.self, forKey: .modifiedAt)
+        status = try container.decode(FileProcessingStatus.self, forKey: .status)
+        reason = try container.decode(String.self, forKey: .reason)
+        remainingSeconds = max(0, try container.decode(Double.self, forKey: .remainingSeconds))
+        ruleName = try container.decode(String.self, forKey: .ruleName)
+        targetFolder = try container.decode(String.self, forKey: .targetFolder)
+        destinationPath = try container.decode(String.self, forKey: .destinationPath)
+        let legacy = try container.decodeIfPresent(Bool.self, forKey: .legacyCanSelect) ?? false
+        canManualMove = try container.decodeIfPresent(Bool.self, forKey: .canManualMove) ?? legacy
+        canIncludeInPlan = try container.decodeIfPresent(Bool.self, forKey: .canIncludeInPlan) ?? false
+        canAutoMoveNow = try container.decodeIfPresent(Bool.self, forKey: .canAutoMoveNow) ?? false
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(path, forKey: .path)
+        try container.encode(fileName, forKey: .fileName)
+        try container.encode(`extension`, forKey: .extension)
+        try container.encode(fileSize, forKey: .fileSize)
+        try container.encode(modifiedAt, forKey: .modifiedAt)
+        try container.encodeIfPresent(modifiedNs, forKey: .modifiedNs)
+        try container.encode(status, forKey: .status)
+        try container.encode(reason, forKey: .reason)
+        try container.encode(remainingSeconds, forKey: .remainingSeconds)
+        try container.encode(ruleName, forKey: .ruleName)
+        try container.encode(targetFolder, forKey: .targetFolder)
+        try container.encode(destinationPath, forKey: .destinationPath)
+        try container.encode(canManualMove, forKey: .canManualMove)
+        try container.encode(canIncludeInPlan, forKey: .canIncludeInPlan)
+        try container.encode(canAutoMoveNow, forKey: .canAutoMoveNow)
     }
 }
 
@@ -106,7 +157,7 @@ struct FileAssessmentDocument: Codable {
         case items
     }
 
-    init(schemaVersion: Int = 1, generatedAt: String, watchFolder: String, items: [FileAssessmentItem]) {
+    init(schemaVersion: Int = 2, generatedAt: String, watchFolder: String, items: [FileAssessmentItem]) {
         self.schemaVersion = schemaVersion
         self.generatedAt = generatedAt
         self.watchFolder = watchFolder

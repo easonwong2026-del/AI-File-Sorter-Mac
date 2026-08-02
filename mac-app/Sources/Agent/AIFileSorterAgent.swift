@@ -234,10 +234,11 @@ struct FileProcessingAssessment {
 
     var canMove: Bool { status == .ready }
 
-    var canSelect: Bool {
+    var canManualMove: Bool {
         switch status {
         case .ready, .awaitingConfirmation, .automaticPending, .waitingRetention,
-             .recentlyModified, .unstable, .unmatched:
+             .recentlyModified, .unstable, .unmatched, .unsupported,
+             .invalidTarget, .destinationInWatchFolder, .sameLocation:
             return true
         default:
             return false
@@ -267,21 +268,24 @@ struct FileProcessingAssessment {
         )
     }
 
-    func scanItem() -> FileAssessmentItem {
-        FileAssessmentItem(
+    func scanItem(organizationMode: String) -> FileAssessmentItem {
+        let canIncludeInPlan = (status == .ready || status == .awaitingConfirmation) && rule != nil
+        return FileAssessmentItem(
             path: source.path,
             fileName: source.lastPathComponent,
             fileExtension: source.pathExtension,
             fileSize: fileSize,
             modifiedAt: modifiedAt.map(iso8601String) ?? "",
+            modifiedNs: signature?.modified,
             status: status,
             reason: detail,
             remainingSeconds: remainingSeconds,
             ruleName: ruleName,
             targetFolder: target?.path ?? "",
             destinationPath: destination?.path ?? "",
-            canSelect: canSelect,
-            canMoveNow: canMove
+            canManualMove: canManualMove,
+            canIncludeInPlan: canIncludeInPlan,
+            canAutoMoveNow: organizationMode == "automatic" && status == .ready
         )
     }
 
@@ -586,12 +590,14 @@ final class NativeSorter {
 
     func signature(_ url: URL) throws -> FileSignature {
         let values = try url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
-        guard let fileSize = values.fileSize, let modified = values.contentModificationDate else {
+        guard let fileSize = values.fileSize,
+              values.contentModificationDate != nil,
+              let modified = AssessmentTimestamp.modifiedNanoseconds(at: url) else {
             throw NativeSorterError.persistenceRead(url, "无法读取文件大小或修改时间")
         }
         return FileSignature(
             size: UInt64(fileSize),
-            modified: Int64(modified.timeIntervalSince1970 * 1_000_000_000)
+            modified: modified
         )
     }
 
@@ -1064,6 +1070,34 @@ final class NativeSorter {
                     target: canonicalTarget,
                     destination: candidateDestination,
                     remainingSeconds: config.stableSeconds,
+                    values: values
+                )
+            }
+            if config.organizationMode == "automatic" {
+                return assessment(
+                    source: standardizedSource,
+                    canonicalSource: canonicalSource,
+                    status: .ready,
+                    detail: "文件已稳定，自动整理可以执行",
+                    signature: currentSignature,
+                    ruleIndex: selectedRule?.offset,
+                    rule: selectedRule?.element,
+                    target: canonicalTarget,
+                    destination: candidateDestination,
+                    values: values
+                )
+            }
+            if config.organizationMode == "manual" {
+                return assessment(
+                    source: standardizedSource,
+                    canonicalSource: canonicalSource,
+                    status: .ready,
+                    detail: "文件符合整理规则，可手动选择目标",
+                    signature: currentSignature,
+                    ruleIndex: selectedRule?.offset,
+                    rule: selectedRule?.element,
+                    target: canonicalTarget,
+                    destination: candidateDestination,
                     values: values
                 )
             }
@@ -1654,7 +1688,9 @@ final class NativeSorter {
     func scanJSON() -> Int32 {
         let items: [FileAssessmentItem]
         do {
-            items = try firstLevelEntries().map { evaluate($0, intent: .scanJSON).scanItem() }
+            items = try firstLevelEntries().map {
+                evaluate($0, intent: .scanJSON).scanItem(organizationMode: config.organizationMode)
+            }
         } catch {
             let item = FileAssessmentItem(
                 path: watchURL.path,
@@ -1662,14 +1698,16 @@ final class NativeSorter {
                 fileExtension: "",
                 fileSize: 0,
                 modifiedAt: "",
+                modifiedNs: nil,
                 status: .permissionError,
                 reason: "无法读取监听目录：\(error.localizedDescription)",
                 remainingSeconds: 0,
                 ruleName: "",
                 targetFolder: "",
                 destinationPath: "",
-                canSelect: false,
-                canMoveNow: false
+                canManualMove: false,
+                canIncludeInPlan: false,
+                canAutoMoveNow: false
             )
             do {
                 try writeScanJSON(items: [item])
