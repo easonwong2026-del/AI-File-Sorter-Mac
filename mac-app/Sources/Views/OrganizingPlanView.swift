@@ -56,7 +56,7 @@ struct OrganizingPlanView: View {
                                 }
                                 Text("→ \(NSString(string: item.destinationPath).abbreviatingWithTildeInPath)")
                                     .font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                                Text("文件年龄 \(item.ageDays) 天 · \(ByteCountFormatter.string(fromByteCount: Int64(min(item.fileSize, UInt64(Int64.max))), countStyle: .file)) · 修改于 \(item.modifiedAt.formatted(date: .abbreviated, time: .shortened))")
+                                Text("文件年龄 \(item.ageDays.map(String.init) ?? "未知") 天 · \(ByteCountFormatter.string(fromByteCount: Int64(min(item.fileSize, UInt64(Int64.max))), countStyle: .file)) · 修改于 \(item.modifiedAt?.formatted(date: .abbreviated, time: .shortened) ?? "未知")")
                                     .font(.caption2).foregroundStyle(.tertiary)
                             }
                             Spacer()

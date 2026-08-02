@@ -481,11 +481,8 @@ struct ProcessResult {
 /// transient selection state.  The Agent owns the safety decision; the App
 /// only consumes these three answers for the corresponding UI affordances.
 ///
-/// `FileAssessmentItem` on the v3.0.0-rc.1 branch still has the combined
-/// `can_select`/`can_move_now` fields.  `legacy(for:)` is a compatibility
-/// adapter for that schema.  Once the scan contract exposes the split fields,
-/// AppModel should pass an instance built from those fields to `PendingFile`
-/// instead of deriving permissions in a view.
+/// `FileAssessmentItem` owns these answers. The App only routes each answer
+/// to the corresponding UI affordance and never re-evaluates file safety.
 struct AssessmentActionPermissions: Equatable {
     let canManualMove: Bool
     let canIncludeInPlan: Bool
@@ -497,41 +494,14 @@ struct AssessmentActionPermissions: Equatable {
         self.canAutoMoveNow = canAutoMoveNow
     }
 
-    /// Compatibility mapping for schema v1.  This is not a second safety
-    /// evaluator: it only translates Agent-provided booleans and the already
-    /// returned high-level status until the split contract is installed.
+    /// Compatibility mapping for old in-memory callers. New scan results
+    /// always pass explicit v2 fields through AppModel.
     static func legacy(for assessment: FileAssessmentItem) -> Self {
-        // A confirmed one-time move may provide a new safe target and may
-        // explicitly bypass retention/recent-modification protection.  The
-        // Agent still performs the authoritative recheck; this list only
-        // decides whether the Inbox should expose that confirmation path.
-        let canBeMovedManually: Bool
-        switch assessment.status {
-        case .ready, .awaitingConfirmation, .automaticPending, .waitingRetention,
-             .recentlyModified, .unstable, .unsupported, .unmatched,
-             .invalidTarget, .destinationInWatchFolder, .sameLocation:
-            canBeMovedManually = true
-        default:
-            canBeMovedManually = false
-        }
-        let canBePlanned: Bool
-        switch assessment.status {
-        case .ready, .awaitingConfirmation:
-            canBePlanned = assessment.canSelect && !assessment.ruleName.isEmpty
-        default:
-            canBePlanned = false
-        }
         return Self(
-            canManualMove: canBeMovedManually,
-            canIncludeInPlan: canBePlanned,
-            canAutoMoveNow: assessment.canMoveNow
+            canManualMove: assessment.canManualMove,
+            canIncludeInPlan: assessment.canIncludeInPlan,
+            canAutoMoveNow: assessment.canAutoMoveNow
         )
-    }
-}
-
-private extension FileAssessmentItem {
-    var legacyActionPermissions: AssessmentActionPermissions {
-        AssessmentActionPermissions.legacy(for: self)
     }
 }
 
@@ -552,7 +522,11 @@ struct PendingFile: Identifiable {
         ignored: Bool = false,
         permissions: AssessmentActionPermissions? = nil
     ) {
-        let resolvedPermissions = permissions ?? assessment.legacyActionPermissions
+        let resolvedPermissions = permissions ?? AssessmentActionPermissions(
+            canManualMove: assessment.canManualMove,
+            canIncludeInPlan: assessment.canIncludeInPlan,
+            canAutoMoveNow: assessment.canAutoMoveNow
+        )
         self.assessment = assessment
         self.permissions = resolvedPermissions
         self.keyword = keyword
@@ -588,7 +562,7 @@ struct PendingFile: Identifiable {
     var target: String { assessment.targetFolder }
     var extensionName: String { assessment.extension }
     var fileSize: UInt64 { assessment.fileSize }
-    var modifiedAt: Date { ISO8601DateFormatter().date(from: assessment.modifiedAt) ?? Date() }
+    var modifiedAt: Date? { AssessmentTimestamp.date(from: assessment.modifiedAt) }
     var status: FileProcessingStatus { assessment.status }
 
     /// Effective UI permissions.  `ignored` is a user interaction state and
@@ -637,8 +611,8 @@ struct OrganizingPlanItem: Identifiable {
     let destinationPath: String
     let status: String
     let fileSize: UInt64
-    let modifiedAt: Date
-    let ageDays: Int
+    let modifiedAt: Date?
+    let ageDays: Int?
     let canManualMove: Bool
     let canIncludeInPlan: Bool
     let canAutoMoveNow: Bool
@@ -653,8 +627,8 @@ struct OrganizingPlanItem: Identifiable {
         destinationPath: String,
         status: String,
         fileSize: UInt64,
-        modifiedAt: Date,
-        ageDays: Int,
+        modifiedAt: Date?,
+        ageDays: Int?,
         canManualMove: Bool,
         canIncludeInPlan: Bool,
         canAutoMoveNow: Bool,
@@ -688,12 +662,11 @@ struct OrganizingPlanItem: Identifiable {
         destinationPath: String,
         status: String,
         fileSize: UInt64,
-        modifiedAt: Date,
-        ageDays: Int,
+        modifiedAt: Date?,
+        ageDays: Int?,
         canSelect: Bool,
         selected: Bool
     ) {
-        let permissions = assessment.legacyActionPermissions
         self.init(
             id: id,
             assessment: assessment,
@@ -705,9 +678,9 @@ struct OrganizingPlanItem: Identifiable {
             fileSize: fileSize,
             modifiedAt: modifiedAt,
             ageDays: ageDays,
-            canManualMove: permissions.canManualMove,
-            canIncludeInPlan: canSelect && permissions.canIncludeInPlan,
-            canAutoMoveNow: permissions.canAutoMoveNow,
+            canManualMove: assessment.canManualMove,
+            canIncludeInPlan: canSelect && assessment.canIncludeInPlan,
+            canAutoMoveNow: assessment.canAutoMoveNow,
             selected: selected
         )
     }

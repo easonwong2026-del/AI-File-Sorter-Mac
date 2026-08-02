@@ -68,7 +68,7 @@ private struct InboxItem: Identifiable {
     let fileName: String
     let extensionName: String
     let fileSize: UInt64
-    let modifiedAt: Date
+    let modifiedAt: Date?
     let kind: InboxRowKind
     let statusTitle: String
     let reason: String
@@ -121,7 +121,14 @@ struct InboxView: View {
             case .name:
                 return lhs.fileName.localizedCaseInsensitiveCompare(rhs.fileName) == .orderedAscending
             case .modified:
-                if lhs.modifiedAt != rhs.modifiedAt { return lhs.modifiedAt > rhs.modifiedAt }
+                if lhs.modifiedAt != rhs.modifiedAt {
+                    switch (lhs.modifiedAt, rhs.modifiedAt) {
+                    case let (left?, right?): return left > right
+                    case (nil, _?): return false
+                    case (_?, nil): return true
+                    default: break
+                    }
+                }
             case .size:
                 if lhs.fileSize != rhs.fileSize { return lhs.fileSize > rhs.fileSize }
             case .status:
@@ -323,7 +330,7 @@ struct InboxView: View {
                     Text(remainingText(remaining))
                         .font(.caption2).foregroundStyle(.secondary).monospacedDigit()
                 } else {
-                    Text(item.modifiedAt.formatted(date: .abbreviated, time: .shortened))
+                    Text(item.modifiedAt?.formatted(date: .abbreviated, time: .shortened) ?? "未知")
                         .font(.caption2).foregroundStyle(.secondary)
                 }
             }
@@ -374,7 +381,7 @@ struct InboxView: View {
                         Text("文件信息").font(.headline)
                         Text("扩展名：\(item.extensionName.isEmpty ? "无" : ".\(item.extensionName)")")
                         Text("大小：\(fileSizeText(item.fileSize))")
-                        Text("最近修改：\(item.modifiedAt.formatted(date: .abbreviated, time: .shortened))")
+                        Text("最近修改：\(item.modifiedAt?.formatted(date: .abbreviated, time: .shortened) ?? "未知")")
                     }
                     .font(.callout)
                     .foregroundStyle(.secondary)
