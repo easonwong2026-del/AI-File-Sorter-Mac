@@ -86,6 +86,7 @@ public enum LaunchAgentManagerError: Error, LocalizedError {
     case commandFailed(action: String, status: Int32, output: String)
     case serviceStillLoaded
     case plistDeletionFailed(URL, reason: String)
+    case rollbackFailed(String)
 
     public var errorDescription: String? {
         switch self {
@@ -128,6 +129,8 @@ public enum LaunchAgentManagerError: Error, LocalizedError {
             return "后台服务停止后仍显示为已加载"
         case let .plistDeletionFailed(url, reason):
             return "删除 LaunchAgent 配置失败：\(url.path)（\(reason)）"
+        case let .rollbackFailed(reason):
+            return "关闭后台服务后恢复原状态失败：\(reason)"
         }
     }
 }
@@ -164,8 +167,70 @@ public struct LaunchAgentInspection {
     }
 }
 
+/// `disableTransaction()` 开始时保存的服务状态和完整 plist 快照。
+///
+/// AppModel 的 SorterConfig 快照仍由调用方自己保存；这里的
+/// `originalConfiguration` 是本次 LaunchAgent 配置上下文，供回滚诊断和
+/// 调用方在恢复配置时使用。
+public struct LaunchAgentDisableSnapshot {
+    public let before: LaunchAgentInspection
+    public let plistData: Data?
+    public let originalConfiguration: LaunchAgentConfiguration?
+
+    public init(
+        before: LaunchAgentInspection,
+        plistData: Data?,
+        originalConfiguration: LaunchAgentConfiguration? = nil
+    ) {
+        self.before = before
+        self.plistData = plistData
+        self.originalConfiguration = originalConfiguration
+    }
+
+    public var serviceWasLoaded: Bool {
+        before.loadState == .loaded
+    }
+
+    public var plistExisted: Bool {
+        before.plistExists
+    }
+}
+
+/// `disableTransaction()` 的结果必须让调用方区分“已关闭”和“关闭失败但原状态已恢复”。
+public enum LaunchAgentDisableOutcome: String, Equatable {
+    case closedSuccessfully = "closed_successfully"
+    case failedButRestored = "failed_but_restored"
+    case failedAndRestoreFailed = "failed_and_restore_failed"
+}
+
+public struct LaunchAgentDisableResult {
+    public let outcome: LaunchAgentDisableOutcome
+    public let before: LaunchAgentInspection
+    public let after: LaunchAgentInspection
+    public let snapshot: LaunchAgentDisableSnapshot
+    public let failure: LaunchAgentManagerError?
+    public let restorationFailure: LaunchAgentManagerError?
+
+    public var succeeded: Bool {
+        outcome == .closedSuccessfully
+    }
+
+    public var wasRestored: Bool {
+        outcome == .failedButRestored
+    }
+
+    public var shouldKeepAutomationEnabled: Bool {
+        outcome != .closedSuccessfully
+    }
+
+    public var error: LaunchAgentManagerError? {
+        restorationFailure ?? failure
+    }
+}
+
 public final class LaunchAgentManager: @unchecked Sendable {
     public typealias CommandExecutor = (LaunchAgentCommand) -> LaunchAgentCommandResult
+    public typealias ItemRemover = (URL) throws -> Void
     public typealias Configuration = LaunchAgentConfiguration
     public typealias Inspection = LaunchAgentInspection
 
@@ -190,13 +255,15 @@ public final class LaunchAgentManager: @unchecked Sendable {
 
     private let fileManager: FileManager
     private let commandExecutor: CommandExecutor
+    private let itemRemover: ItemRemover
 
     public init(
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         fixedApplicationURL: URL = URL(fileURLWithPath: "/Applications/AI File Sorter.app", isDirectory: true),
         userID: UInt32? = nil,
         fileManager: FileManager = .default,
-        commandExecutor: CommandExecutor? = nil
+        commandExecutor: CommandExecutor? = nil,
+        itemRemover: ItemRemover? = nil
     ) {
         let normalizedHome = homeDirectory.standardizedFileURL
         let normalizedApp = fixedApplicationURL.standardizedFileURL
@@ -213,6 +280,9 @@ public final class LaunchAgentManager: @unchecked Sendable {
         self.userID = userID ?? UInt32(getuid())
         self.fileManager = fileManager
         self.commandExecutor = commandExecutor ?? Self.runCommand
+        self.itemRemover = itemRemover ?? { url in
+            try fileManager.removeItem(at: url)
+        }
     }
 
     public func makeConfiguration(
@@ -464,69 +534,98 @@ public final class LaunchAgentManager: @unchecked Sendable {
         try enable(configuration)
     }
 
-    /// bootout 成功或已确认服务未加载后，删除 plist。删除失败一定向调用方返回错误。
+    /// 执行关闭事务并返回结构化结果。
+    ///
+    /// 事务开始时保存服务加载状态和原始 plist（即 LaunchAgent 的完整配置快照）。
+    /// 任何 bootout、删除或最终状态校验失败都会尝试恢复这份快照；原服务若曾加载，
+    /// 且当前已不再加载，则会用原 plist 重新 bootstrap，并再次验证加载状态。
     @discardableResult
-    public func disable() throws -> LaunchAgentInspection {
+    public func disableTransaction(
+        configuration: LaunchAgentConfiguration? = nil
+    ) -> LaunchAgentDisableResult {
         let before = inspect()
-        var didAttemptBootout = false
-        if before.loaded {
-            didAttemptBootout = true
-            let bootout = runBootout()
-            guard bootout.succeeded || Self.isServiceNotLoaded(bootout) else {
-                throw LaunchAgentManagerError.commandFailed(
-                    action: "卸载",
-                    status: bootout.status,
-                    output: bootout.output
-                )
-            }
-        } else if before.loadState == .unavailable {
-            didAttemptBootout = true
-            let bootout = runBootout()
-            guard bootout.succeeded || Self.isServiceNotLoaded(bootout) else {
-                throw LaunchAgentManagerError.commandFailed(
-                    action: "卸载",
-                    status: bootout.status,
-                    output: bootout.output
-                )
-            }
-        }
-        if didAttemptBootout {
-            let afterBootout = inspect()
-            guard afterBootout.loadState == .notLoaded else {
-                if afterBootout.loaded {
-                    throw LaunchAgentManagerError.serviceStillLoaded
-                }
-                throw LaunchAgentManagerError.serviceProbeUnavailable(
-                    afterBootout.launchctlError ?? "bootout 后无法确认服务已停止"
-                )
-            }
+        let originalPlistData: Data? = before.plistExists
+            ? try? Data(contentsOf: launchAgentPlistURL)
+            : nil
+        let snapshot = DisableSnapshot(
+            before: before,
+            plistData: originalPlistData,
+            originalConfiguration: configuration
+        )
+
+        if before.plistExists && originalPlistData == nil {
+            let failure = LaunchAgentManagerError.plistUnreadable(launchAgentPlistURL)
+            return makeDisableResult(
+                outcome: .failedButRestored,
+                snapshot: snapshot,
+                after: inspect(),
+                failure: failure,
+                restorationFailure: nil
+            )
         }
 
-        if fileManager.fileExists(atPath: launchAgentPlistURL.path) {
-            var isDirectory = ObjCBool(false)
-            guard fileManager.fileExists(atPath: launchAgentPlistURL.path, isDirectory: &isDirectory),
-                  !isDirectory.boolValue else {
-                throw LaunchAgentManagerError.plistDeletionFailed(
-                    launchAgentPlistURL,
-                    reason: "目标不是普通 plist 文件"
-                )
-            }
-            do {
-                try fileManager.removeItem(at: launchAgentPlistURL)
-            } catch {
-                throw LaunchAgentManagerError.plistDeletionFailed(
-                    launchAgentPlistURL,
-                    reason: error.localizedDescription
-                )
-            }
-            guard !fileManager.fileExists(atPath: launchAgentPlistURL.path) else {
-                throw LaunchAgentManagerError.plistDeletionFailed(
-                    launchAgentPlistURL,
-                    reason: "删除后文件仍然存在"
-                )
-            }
+        guard before.loadState != .unavailable else {
+            let failure = LaunchAgentManagerError.serviceProbeUnavailable(
+                before.launchctlError ?? "关闭前无法确认服务状态"
+            )
+            return makeDisableResult(
+                outcome: .failedButRestored,
+                snapshot: snapshot,
+                after: inspect(),
+                failure: failure,
+                restorationFailure: nil
+            )
         }
-        return inspect()
+
+        do {
+            if snapshot.serviceWasLoaded {
+                let bootout = runBootout()
+                guard bootout.succeeded else {
+                    throw LaunchAgentManagerError.commandFailed(
+                        action: "卸载",
+                        status: bootout.status,
+                        output: bootout.output
+                    )
+                }
+                try requireNotLoaded(inspect(), action: "bootout")
+            }
+
+            try removePlistIfPresent()
+            let after = inspect()
+            try requireNotLoaded(after, action: "关闭")
+            guard !after.plistExists else {
+                throw LaunchAgentManagerError.plistDeletionFailed(
+                    launchAgentPlistURL,
+                    reason: "关闭后 plist 仍然存在"
+                )
+            }
+            return makeDisableResult(
+                outcome: .closedSuccessfully,
+                snapshot: snapshot,
+                after: after,
+                failure: nil,
+                restorationFailure: nil
+            )
+        } catch let error as LaunchAgentManagerError {
+            return restoreAfterDisableFailure(snapshot, failure: error)
+        } catch {
+            return restoreAfterDisableFailure(
+                snapshot,
+                failure: .rollbackFailed(error.localizedDescription)
+            )
+        }
+    }
+
+    /// 兼容现有调用方的 throwing 包装。需要展示准确失败状态的调用方应使用
+    /// `disableTransaction()` 并根据 `outcome` 更新 UI/配置。
+    @discardableResult
+    public func disable() throws -> LaunchAgentInspection {
+        let result = disableTransaction()
+        guard result.succeeded else {
+            throw result.restorationFailure ?? result.failure
+                ?? LaunchAgentManagerError.rollbackFailed("关闭事务未完成")
+        }
+        return result.after
     }
 
     /// `bootout` 是 disable 的语义别名，包含删除 plist 的完整关闭事务。
@@ -682,6 +781,221 @@ public final class LaunchAgentManager: @unchecked Sendable {
                 executable: Self.launchctlPath,
                 arguments: ["bootout", serviceDomain]
             )
+        )
+    }
+
+    private typealias DisableSnapshot = LaunchAgentDisableSnapshot
+
+    private func requireNotLoaded(
+        _ inspection: LaunchAgentInspection,
+        action: String
+    ) throws {
+        guard inspection.loadState == .notLoaded else {
+            if inspection.loaded {
+                throw LaunchAgentManagerError.serviceStillLoaded
+            }
+            throw LaunchAgentManagerError.serviceProbeUnavailable(
+                inspection.launchctlError ?? "\(action) 后无法确认服务已停止"
+            )
+        }
+    }
+
+    private func removePlistIfPresent() throws {
+        guard fileManager.fileExists(atPath: launchAgentPlistURL.path) else {
+            return
+        }
+        var isDirectory = ObjCBool(false)
+        guard fileManager.fileExists(atPath: launchAgentPlistURL.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue else {
+            throw LaunchAgentManagerError.plistDeletionFailed(
+                launchAgentPlistURL,
+                reason: "目标不是普通 plist 文件"
+            )
+        }
+        do {
+            try itemRemover(launchAgentPlistURL)
+        } catch {
+            throw LaunchAgentManagerError.plistDeletionFailed(
+                launchAgentPlistURL,
+                reason: error.localizedDescription
+            )
+        }
+        guard !fileManager.fileExists(atPath: launchAgentPlistURL.path) else {
+            throw LaunchAgentManagerError.plistDeletionFailed(
+                launchAgentPlistURL,
+                reason: "删除后文件仍然存在"
+            )
+        }
+    }
+
+    private func restoreAfterDisableFailure(
+        _ snapshot: DisableSnapshot,
+        failure: LaunchAgentManagerError
+    ) -> LaunchAgentDisableResult {
+        do {
+            try restorePlist(from: snapshot)
+
+            var current = inspect()
+            if snapshot.serviceWasLoaded {
+                if !current.loaded {
+                    let bootstrap = runBootstrap()
+                    current = inspect()
+                    if !current.loaded {
+                        if !bootstrap.succeeded {
+                            throw LaunchAgentManagerError.commandFailed(
+                                action: "恢复加载",
+                                status: bootstrap.status,
+                                output: bootstrap.output
+                            )
+                        }
+                        throw LaunchAgentManagerError.serviceProbeUnavailable(
+                            current.launchctlError ?? "恢复 bootstrap 后服务未显示为已加载"
+                        )
+                    }
+                }
+            } else if current.loaded {
+                let bootout = runBootout()
+                guard bootout.succeeded else {
+                    let afterBootoutFailure = inspect()
+                    guard afterBootoutFailure.loadState == .notLoaded else {
+                        throw LaunchAgentManagerError.commandFailed(
+                            action: "恢复卸载",
+                            status: bootout.status,
+                            output: bootout.output
+                        )
+                    }
+                    current = afterBootoutFailure
+                    return try finishRestoredDisableFailure(
+                        snapshot,
+                        failure: failure,
+                        after: current
+                    )
+                }
+                current = inspect()
+                guard current.loadState == .notLoaded else {
+                    throw LaunchAgentManagerError.commandFailed(
+                        action: "恢复卸载",
+                        status: bootout.status,
+                        output: bootout.output
+                    )
+                }
+            }
+
+            let after = inspect()
+            return try finishRestoredDisableFailure(
+                snapshot,
+                failure: failure,
+                after: after
+            )
+        } catch let restorationError as LaunchAgentManagerError {
+            return makeDisableResult(
+                outcome: .failedAndRestoreFailed,
+                snapshot: snapshot,
+                after: inspect(),
+                failure: failure,
+                restorationFailure: restorationError
+            )
+        } catch {
+            let restorationError = LaunchAgentManagerError.rollbackFailed(error.localizedDescription)
+            return makeDisableResult(
+                outcome: .failedAndRestoreFailed,
+                snapshot: snapshot,
+                after: inspect(),
+                failure: failure,
+                restorationFailure: restorationError
+            )
+        }
+    }
+
+    private func finishRestoredDisableFailure(
+        _ snapshot: DisableSnapshot,
+        failure: LaunchAgentManagerError,
+        after: LaunchAgentInspection
+    ) throws -> LaunchAgentDisableResult {
+        try verifyDisableSnapshot(snapshot, after: after)
+        return makeDisableResult(
+            outcome: .failedButRestored,
+            snapshot: snapshot,
+            after: after,
+            failure: failure,
+            restorationFailure: nil
+        )
+    }
+
+    private func restorePlist(from snapshot: DisableSnapshot) throws {
+        if snapshot.plistExisted {
+            guard let plistData = snapshot.plistData else {
+                throw LaunchAgentManagerError.rollbackFailed("原始 plist 内容不可读取")
+            }
+            do {
+                try ensureDirectory(at: launchAgentsDirectory)
+                try plistData.write(to: launchAgentPlistURL, options: .atomic)
+                guard let restoredData = try? Data(contentsOf: launchAgentPlistURL),
+                      restoredData == plistData else {
+                    throw LaunchAgentManagerError.rollbackFailed("原始 plist 内容写回后校验不一致")
+                }
+            } catch let error as LaunchAgentManagerError {
+                throw error
+            } catch {
+                throw LaunchAgentManagerError.rollbackFailed(
+                    "写回原始 plist 失败：\(error.localizedDescription)"
+                )
+            }
+        } else if fileManager.fileExists(atPath: launchAgentPlistURL.path) {
+            do {
+                try itemRemover(launchAgentPlistURL)
+            } catch {
+                throw LaunchAgentManagerError.rollbackFailed(
+                    "移除事务期间生成的 plist 失败：\(error.localizedDescription)"
+                )
+            }
+        }
+    }
+
+    private func verifyDisableSnapshot(
+        _ snapshot: DisableSnapshot,
+        after: LaunchAgentInspection
+    ) throws {
+        guard after.plistExists == snapshot.before.plistExists else {
+            throw LaunchAgentManagerError.rollbackFailed("原始 plist 存在状态未恢复")
+        }
+        if snapshot.before.plistExists {
+            guard let plistData = snapshot.plistData else {
+                throw LaunchAgentManagerError.rollbackFailed("原始 plist 内容不可读取")
+            }
+            guard let restoredData = try? Data(contentsOf: launchAgentPlistURL),
+                  restoredData == plistData else {
+                throw LaunchAgentManagerError.rollbackFailed("原始 plist 内容未恢复")
+            }
+        }
+        switch snapshot.before.loadState {
+        case .loaded:
+            guard after.loadState == .loaded else {
+                throw LaunchAgentManagerError.rollbackFailed("原服务未恢复为已加载")
+            }
+        case .notLoaded:
+            guard after.loadState == .notLoaded else {
+                throw LaunchAgentManagerError.rollbackFailed("原服务未恢复为未加载")
+            }
+        case .unavailable:
+            throw LaunchAgentManagerError.rollbackFailed("原服务状态不可确认")
+        }
+    }
+
+    private func makeDisableResult(
+        outcome: LaunchAgentDisableOutcome,
+        snapshot: DisableSnapshot,
+        after: LaunchAgentInspection,
+        failure: LaunchAgentManagerError?,
+        restorationFailure: LaunchAgentManagerError?
+    ) -> LaunchAgentDisableResult {
+        LaunchAgentDisableResult(
+            outcome: outcome,
+            before: snapshot.before,
+            after: after,
+            snapshot: snapshot,
+            failure: failure,
+            restorationFailure: restorationFailure
         )
     }
 
