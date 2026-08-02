@@ -75,7 +75,7 @@ private struct InboxItem: Identifiable {
     let remaining: TimeInterval?
     let target: String
     let keyword: String
-    let isPending: Bool
+    let canManualMove: Bool
 }
 
 struct InboxView: View {
@@ -89,7 +89,7 @@ struct InboxView: View {
     @State private var watchFolderError: String?
     @State private var showingPlan = false
 
-    private var selectedCount: Int { model.pendingFiles.count { $0.selected && $0.canSelect } }
+    private var selectedCount: Int { model.pendingFiles.count { $0.selected && $0.canManualMove } }
 
     private var extensions: [String] {
         ["全部", "无扩展名"] + inboxItems.map(\.extensionName).filter { !$0.isEmpty }.sorted().reduce(into: [String]()) {
@@ -233,7 +233,33 @@ struct InboxView: View {
                 .padding(.horizontal, 12).padding(.bottom, 9)
         }
         .onAppear { refreshInbox() }
-        .onChange(of: model.pendingFiles.map { "\($0.path)|\($0.ignored)|\($0.assessment.status.rawValue)|\($0.assessment.reason)" }) { _ in refreshInbox() }
+        .onChange(of: model.pendingFiles.map {
+            [
+                $0.path,
+                $0.keyword,
+                String($0.selected),
+                String($0.ignored),
+                $0.assessment.fileName,
+                $0.assessment.extension,
+                String($0.assessment.fileSize),
+                $0.assessment.modifiedAt,
+                $0.assessment.status.rawValue,
+                $0.assessment.reason,
+                String($0.assessment.remainingSeconds),
+                $0.assessment.ruleName,
+                $0.assessment.targetFolder,
+                $0.assessment.destinationPath,
+                String($0.canManualMove),
+                String($0.canIncludeInPlan),
+                String($0.canAutoMoveNow),
+            ].joined(separator: "|")
+        }) { _ in refreshInbox() }
+        // A successful scan replaces the complete assessment snapshot.  This
+        // keeps the local row projection in sync even when only target,
+        // remaining time, size, or modified time changed.  A failed scan
+        // preserves the previous rows but still updates the visible error.
+        .onChange(of: model.inboxSnapshot?.generatedAt) { _ in refreshInbox() }
+        .onChange(of: model.scanError) { _ in refreshInbox() }
         .onChange(of: model.config) { _ in refreshInbox() }
         .sheet(item: $model.pendingMoveDraft) { draft in
             PendingMoveSheet(model: model, draft: draft)
@@ -280,7 +306,7 @@ struct InboxView: View {
             Toggle("", isOn: selectionBinding(for: item))
                 .labelsHidden()
                 .toggleStyle(.checkbox)
-                .disabled(!item.isPending)
+                .disabled(!item.canManualMove)
             Image(systemName: statusIcon(for: item.kind))
                 .foregroundStyle(statusColor(for: item.kind))
                 .frame(width: 18)
@@ -324,7 +350,7 @@ struct InboxView: View {
                         Spacer(minLength: 12)
                         Toggle("加入批量操作", isOn: selectionBinding(for: item))
                             .toggleStyle(.checkbox)
-                            .disabled(!item.isPending)
+                            .disabled(!item.canManualMove)
                     }
 
                     VStack(alignment: .leading, spacing: 10) {
@@ -358,12 +384,12 @@ struct InboxView: View {
                         Button("快速预览") { model.quickLookPending(pendingFile(for: item)) }
                             .keyboardShortcut(.space, modifiers: [])
                         Button("在 Finder 显示") { model.revealPending(pendingFile(for: item)) }
-                        if item.isPending {
+                        if item.canManualMove {
                             Button("整理一次…") { model.beginPendingMove(paths: [item.path]) }
                                 .buttonStyle(.borderedProminent)
                         }
                     }
-                    if !item.isPending {
+                    if !item.canManualMove {
                         Text("当前文件保留在收件箱中用于说明状态；执行按钮只对现有可执行列表启用。")
                             .font(.caption).foregroundStyle(.secondary)
                     }
@@ -394,7 +420,7 @@ struct InboxView: View {
                 remaining: assessment.remainingSeconds > 0 ? assessment.remainingSeconds : nil,
                 target: assessment.targetFolder,
                 keyword: pending.keyword,
-                isPending: pending.canSelect
+                canManualMove: pending.canManualMove
             )
         }
         watchFolderError = model.inboxSnapshot == nil ? model.scanError : nil
@@ -407,16 +433,20 @@ struct InboxView: View {
 
     private func selectionBinding(for item: InboxItem) -> Binding<Bool> {
         Binding(
-            get: { model.pendingFiles.first(where: { $0.path == item.path })?.selected ?? false },
+            get: {
+                guard let pending = model.pendingFiles.first(where: { $0.path == item.path }) else { return false }
+                return pending.selected && pending.canManualMove
+            },
             set: { value in
                 guard let index = model.pendingFiles.firstIndex(where: { $0.path == item.path }) else { return }
-                model.pendingFiles[index].selected = value
+                model.pendingFiles[index].selected = value && model.pendingFiles[index].canManualMove
             }
         )
     }
 
     private func pendingFile(for item: InboxItem) -> PendingFile {
-        PendingFile(assessment: item.assessment, keyword: item.keyword, selected: item.isPending)
+        model.pendingFiles.first(where: { $0.path == item.path })
+            ?? PendingFile(assessment: item.assessment, keyword: item.keyword, selected: item.canManualMove)
     }
 
     private func nonEmptyPath(_ value: String) -> String? {

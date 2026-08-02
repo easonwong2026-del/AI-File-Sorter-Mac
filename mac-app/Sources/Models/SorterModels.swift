@@ -477,12 +477,110 @@ struct ProcessResult {
     let output: String
 }
 
+/// Agent assessment permissions are deliberately separate from the user's
+/// transient selection state.  The Agent owns the safety decision; the App
+/// only consumes these three answers for the corresponding UI affordances.
+///
+/// `FileAssessmentItem` on the v3.0.0-rc.1 branch still has the combined
+/// `can_select`/`can_move_now` fields.  `legacy(for:)` is a compatibility
+/// adapter for that schema.  Once the scan contract exposes the split fields,
+/// AppModel should pass an instance built from those fields to `PendingFile`
+/// instead of deriving permissions in a view.
+struct AssessmentActionPermissions: Equatable {
+    let canManualMove: Bool
+    let canIncludeInPlan: Bool
+    let canAutoMoveNow: Bool
+
+    init(canManualMove: Bool, canIncludeInPlan: Bool, canAutoMoveNow: Bool) {
+        self.canManualMove = canManualMove
+        self.canIncludeInPlan = canIncludeInPlan
+        self.canAutoMoveNow = canAutoMoveNow
+    }
+
+    /// Compatibility mapping for schema v1.  This is not a second safety
+    /// evaluator: it only translates Agent-provided booleans and the already
+    /// returned high-level status until the split contract is installed.
+    static func legacy(for assessment: FileAssessmentItem) -> Self {
+        // A confirmed one-time move may provide a new safe target and may
+        // explicitly bypass retention/recent-modification protection.  The
+        // Agent still performs the authoritative recheck; this list only
+        // decides whether the Inbox should expose that confirmation path.
+        let canBeMovedManually: Bool
+        switch assessment.status {
+        case .ready, .awaitingConfirmation, .automaticPending, .waitingRetention,
+             .recentlyModified, .unstable, .unsupported, .unmatched,
+             .invalidTarget, .destinationInWatchFolder, .sameLocation:
+            canBeMovedManually = true
+        default:
+            canBeMovedManually = false
+        }
+        let canBePlanned: Bool
+        switch assessment.status {
+        case .ready, .awaitingConfirmation:
+            canBePlanned = assessment.canSelect && !assessment.ruleName.isEmpty
+        default:
+            canBePlanned = false
+        }
+        return Self(
+            canManualMove: canBeMovedManually,
+            canIncludeInPlan: canBePlanned,
+            canAutoMoveNow: assessment.canMoveNow
+        )
+    }
+}
+
+private extension FileAssessmentItem {
+    var legacyActionPermissions: AssessmentActionPermissions {
+        AssessmentActionPermissions.legacy(for: self)
+    }
+}
+
 // 收件箱条目只保留 Agent 评估结果和界面选择状态，避免 App 重新判断文件资格。
 struct PendingFile: Identifiable {
     let assessment: FileAssessmentItem
+    /// Permissions belong to the current assessment and must be replaced on
+    /// every successful scan.  They are intentionally not user-editable.
+    let permissions: AssessmentActionPermissions
     var keyword: String
     var selected = true
     var ignored = false
+
+    init(
+        assessment: FileAssessmentItem,
+        keyword: String,
+        selected: Bool? = nil,
+        ignored: Bool = false,
+        permissions: AssessmentActionPermissions? = nil
+    ) {
+        let resolvedPermissions = permissions ?? assessment.legacyActionPermissions
+        self.assessment = assessment
+        self.permissions = resolvedPermissions
+        self.keyword = keyword
+        self.ignored = ignored
+        let requestedSelection = selected ?? resolvedPermissions.canManualMove
+        // A stale user selection must never survive a scan that removes the
+        // manual-move permission (for example locked/hidden/temporary files).
+        self.selected = requestedSelection && resolvedPermissions.canManualMove && !ignored
+    }
+
+    /// Rebuild one row from a successful scan while preserving only the
+    /// interaction state that belongs to the user.  All assessment-derived
+    /// fields, including permissions, are taken from `assessment`.
+    static func rebuilding(
+        assessment: FileAssessmentItem,
+        previous: PendingFile?,
+        suggestedKeyword: String,
+        ignored: Bool? = nil,
+        permissions: AssessmentActionPermissions? = nil
+    ) -> PendingFile {
+        PendingFile(
+            assessment: assessment,
+            keyword: previous?.keyword ?? suggestedKeyword,
+            selected: previous?.selected,
+            ignored: ignored ?? previous?.ignored ?? false,
+            permissions: permissions
+        )
+    }
 
     var id: String { assessment.path }
     var path: String { assessment.path }
@@ -492,7 +590,17 @@ struct PendingFile: Identifiable {
     var fileSize: UInt64 { assessment.fileSize }
     var modifiedAt: Date { ISO8601DateFormatter().date(from: assessment.modifiedAt) ?? Date() }
     var status: FileProcessingStatus { assessment.status }
-    var canSelect: Bool { assessment.canSelect && !ignored }
+
+    /// Effective UI permissions.  `ignored` is a user interaction state and
+    /// therefore only gates manual/plan affordances; it must not rewrite the
+    /// Agent's `canAutoMoveNow` answer.
+    var canManualMove: Bool { permissions.canManualMove && !ignored }
+    var canIncludeInPlan: Bool { permissions.canIncludeInPlan && !ignored }
+    var canAutoMoveNow: Bool { permissions.canAutoMoveNow }
+
+    /// Source compatibility for callers not yet migrated to the explicit
+    /// manual-move name.  New UI code should use `canManualMove`.
+    var canSelect: Bool { canManualMove }
 }
 
 // 单个与批量整理共用同一份草稿，避免“最近目录”“批量移动”“建立规则”各走一套逻辑。
@@ -531,6 +639,80 @@ struct OrganizingPlanItem: Identifiable {
     let fileSize: UInt64
     let modifiedAt: Date
     let ageDays: Int
-    let canSelect: Bool
+    let canManualMove: Bool
+    let canIncludeInPlan: Bool
+    let canAutoMoveNow: Bool
     var selected: Bool
+
+    init(
+        id: String,
+        assessment: FileAssessmentItem,
+        sourcePath: String,
+        fileName: String,
+        ruleName: String,
+        destinationPath: String,
+        status: String,
+        fileSize: UInt64,
+        modifiedAt: Date,
+        ageDays: Int,
+        canManualMove: Bool,
+        canIncludeInPlan: Bool,
+        canAutoMoveNow: Bool,
+        selected: Bool
+    ) {
+        self.id = id
+        self.assessment = assessment
+        self.sourcePath = sourcePath
+        self.fileName = fileName
+        self.ruleName = ruleName
+        self.destinationPath = destinationPath
+        self.status = status
+        self.fileSize = fileSize
+        self.modifiedAt = modifiedAt
+        self.ageDays = ageDays
+        self.canManualMove = canManualMove
+        self.canIncludeInPlan = canIncludeInPlan
+        self.canAutoMoveNow = canAutoMoveNow
+        self.selected = selected && canIncludeInPlan
+    }
+
+    /// Source-compatible initializer for AppModel before its plan builder is
+    /// migrated to pass the three explicit permissions.  The stored result is
+    /// still split, and `canSelect` is interpreted as the plan flag here.
+    init(
+        id: String,
+        assessment: FileAssessmentItem,
+        sourcePath: String,
+        fileName: String,
+        ruleName: String,
+        destinationPath: String,
+        status: String,
+        fileSize: UInt64,
+        modifiedAt: Date,
+        ageDays: Int,
+        canSelect: Bool,
+        selected: Bool
+    ) {
+        let permissions = assessment.legacyActionPermissions
+        self.init(
+            id: id,
+            assessment: assessment,
+            sourcePath: sourcePath,
+            fileName: fileName,
+            ruleName: ruleName,
+            destinationPath: destinationPath,
+            status: status,
+            fileSize: fileSize,
+            modifiedAt: modifiedAt,
+            ageDays: ageDays,
+            canManualMove: permissions.canManualMove,
+            canIncludeInPlan: canSelect && permissions.canIncludeInPlan,
+            canAutoMoveNow: permissions.canAutoMoveNow,
+            selected: selected
+        )
+    }
+
+    /// Compatibility for callers that still use the ambiguous name.  It now
+    /// means plan inclusion only; inbox code must use `canManualMove`.
+    var canSelect: Bool { canIncludeInPlan }
 }

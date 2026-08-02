@@ -9,7 +9,9 @@ struct OrganizingPlanView: View {
     @ObservedObject var model: AppModel
     @Binding var isPresented: Bool
 
-    private var selectedItems: [OrganizingPlanItem] { model.organizingPlan.filter(\.selected) }
+    private var selectedItems: [OrganizingPlanItem] {
+        model.organizingPlan.filter { $0.selected && $0.canIncludeInPlan }
+    }
 
     private var selectedSizeText: String {
         ByteCountFormatter.string(fromByteCount: Int64(min(selectedItems.reduce(0) { $0 + $1.fileSize }, UInt64(Int64.max))), countStyle: .file)
@@ -27,7 +29,7 @@ struct OrganizingPlanView: View {
                 }
                 Spacer()
                 Button("全选") {
-                    for index in model.organizingPlan.indices where model.organizingPlan[index].canSelect {
+                    for index in model.organizingPlan.indices where model.organizingPlan[index].canIncludeInPlan {
                         model.organizingPlan[index].selected = true
                     }
                 }
@@ -43,7 +45,7 @@ struct OrganizingPlanView: View {
                     ForEach($model.organizingPlan) { $item in
                         HStack(alignment: .top, spacing: 10) {
                             Toggle("", isOn: $item.selected).labelsHidden()
-                                .disabled(!item.canSelect)
+                                .disabled(!item.canIncludeInPlan)
                             Image(systemName: "doc").foregroundStyle(.secondary)
                             VStack(alignment: .leading, spacing: 4) {
                                 HStack {
@@ -59,7 +61,7 @@ struct OrganizingPlanView: View {
                             }
                             Spacer()
                             Text(item.status).font(.caption)
-                                .foregroundStyle(item.canSelect ? Color.secondary : Color.orange)
+                                .foregroundStyle(item.canIncludeInPlan ? Color.secondary : Color.orange)
                         }.padding(.vertical, 5)
                     }
                 }.listStyle(.inset)
@@ -75,7 +77,7 @@ struct OrganizingPlanView: View {
                     isPresented = false
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(model.busy || !model.organizingPlan.contains(where: \.selected))
+                .disabled(model.busy || !model.organizingPlan.contains { $0.selected && $0.canIncludeInPlan })
             }
         }
         .padding(22)
